@@ -44,8 +44,6 @@ pub fn parse_battery(output: &str) -> BatteryInfo {
     let status_code: u32 = get("status").parse().unwrap_or(1);
     let health_code: u32 = get("health").parse().unwrap_or(1);
     let temp: f64 = get("temperature").parse::<f64>().unwrap_or(0.0) / 10.0;
-    let volt: f64 = get("voltage").parse::<f64>().unwrap_or(0.0) / 1000.0;
-    let technology = get("technology");
 
     let status = match status_code {
         2 => "Charging",
@@ -72,8 +70,6 @@ pub fn parse_battery(output: &str) -> BatteryInfo {
         status,
         health,
         temperature: format!("{temp:.1}°C"),
-        voltage: format!("{volt:.2}V"),
-        technology,
     }
 }
 
@@ -136,8 +132,8 @@ pub fn parse_logcat_line(line: &str) -> Option<LogEntry> {
     let parts: Vec<&str> = line.splitn(6, char::is_whitespace).collect();
     if parts.len() >= 6 {
         let date_time = format!("{} {}", parts[0], parts[1]);
-        let pid = parts[2].trim().to_string();
-        let tid = parts[3].trim().to_string();
+        let _pid = parts[2].trim();
+        let _tid = parts[3].trim();
         let level_str = parts[4].trim();
 
         if let Some(level) = level_str.chars().next().and_then(LogLevel::from_char) {
@@ -152,8 +148,6 @@ pub fn parse_logcat_line(line: &str) -> Option<LogEntry> {
 
             return Some(LogEntry {
                 timestamp: date_time,
-                pid,
-                tid,
                 level,
                 tag,
                 message,
@@ -164,8 +158,6 @@ pub fn parse_logcat_line(line: &str) -> Option<LogEntry> {
     // Fallback: treat entire line as a message
     Some(LogEntry {
         timestamp: String::new(),
-        pid: String::new(),
-        tid: String::new(),
         level: LogLevel::Info,
         tag: String::new(),
         message: line.to_string(),
@@ -199,23 +191,20 @@ pub fn parse_ls_output(output: &str, parent_path: &str) -> Vec<FileEntry> {
 
         let is_directory = permissions.starts_with('d');
         let is_symlink = permissions.starts_with('l');
-        let owner = parts[2].to_string();
-        let group = parts[3].to_string();
         let size: u64 = parts[4].parse().unwrap_or(0);
 
         // Date is parts[5] + parts[6], name is parts[7]
-        let modified_date = format!("{} {}", parts[5], parts[6]);
         let name_part = parts[7].trim();
 
         // Handle symlinks: "name -> target"
-        let (name, link_target) = if is_symlink {
+        let name = if is_symlink {
             if let Some(arrow) = name_part.find(" -> ") {
-                (name_part[..arrow].to_string(), Some(name_part[arrow + 4..].to_string()))
+                name_part[..arrow].to_string()
             } else {
-                (name_part.to_string(), None)
+                name_part.to_string()
             }
         } else {
-            (name_part.to_string(), None)
+            name_part.to_string()
         };
 
         // Skip . and ..
@@ -229,11 +218,7 @@ pub fn parse_ls_output(output: &str, parent_path: &str) -> Vec<FileEntry> {
             is_directory,
             size,
             permissions,
-            owner,
-            group,
-            modified_date,
             is_symlink,
-            link_target,
         });
     }
 
@@ -262,9 +247,6 @@ pub fn parse_package_list(output: &str) -> Vec<PackageInfo> {
                     package_name,
                     is_system,
                     is_enabled: true,
-                    version_name: None,
-                    version_code: None,
-                    installed_path: Some(path),
                 });
             }
         }
@@ -319,8 +301,6 @@ pub fn parse_package_details(output: &str, package_name: &str) -> PackageDetails
         }
     }
 
-    let is_system = installed_path.starts_with("/system") || installed_path.starts_with("/product");
-
     PackageDetails {
         package_name: package_name.to_string(),
         version_name,
@@ -328,8 +308,6 @@ pub fn parse_package_details(output: &str, package_name: &str) -> PackageDetails
         installed_path,
         first_install_time: first_install,
         last_update_time: last_update,
-        is_system,
-        is_enabled: true,
         permissions,
     }
 }
@@ -352,6 +330,7 @@ pub fn parse_settings_list(output: &str) -> Vec<SettingEntry> {
 /// Parse `top -n 1 -b` output for CPU usage and process list.
 pub fn parse_top_output(output: &str) -> (f64, Vec<ProcessInfo>) {
     let mut cpu_percent = 0.0;
+    let mut total_cpu = 0.0_f64; // Total CPU capacity (num_cores * 100)
     let mut processes = Vec::new();
     let mut in_process_section = false;
 
@@ -359,18 +338,24 @@ pub fn parse_top_output(output: &str) -> (f64, Vec<ProcessInfo>) {
         let trimmed = line.trim();
 
         // CPU line varies by Android version, look for common patterns
+        // e.g., "800%cpu  52%user   7%nice  45%sys  307%idle ..."
+        // The total (800%) is per-core sum, so on 8 cores idle can be > 100%.
+        // We compute: usage = (total - idle) / total * 100
         if trimmed.contains("cpu") && trimmed.contains('%') && !in_process_section {
-            // Try to parse combined CPU usage
-            // e.g., "800%cpu  52%user   7%nice  45%sys ..."
-            // or "Tasks: ...  CPU%idle: 85.3"
-            if let Some(idle_str) = trimmed.split("idle").next() {
-                if let Some(pct) = idle_str
-                    .split_whitespace()
-                    .last()
-                    .and_then(|s| s.trim_end_matches('%').parse::<f64>().ok())
-                {
-                    cpu_percent = 100.0 - pct;
+            let mut idle = 0.0_f64;
+            for token in trimmed.split_whitespace() {
+                if token.ends_with("%cpu") {
+                    if let Ok(v) = token.trim_end_matches("%cpu").parse::<f64>() {
+                        total_cpu = v;
+                    }
+                } else if token.ends_with("%idle") {
+                    if let Ok(v) = token.trim_end_matches("%idle").parse::<f64>() {
+                        idle = v;
+                    }
                 }
+            }
+            if total_cpu > 0.0 {
+                cpu_percent = ((total_cpu - idle) / total_cpu * 100.0).clamp(0.0, 100.0);
             }
         }
 
@@ -382,25 +367,34 @@ pub fn parse_top_output(output: &str) -> (f64, Vec<ProcessInfo>) {
 
         if in_process_section && !trimmed.is_empty() {
             let parts: Vec<&str> = trimmed.split_whitespace().collect();
-            if parts.len() >= 10 {
-                // Standard top output columns vary, but PID is first and NAME is last
+            // Standard Android top: PID(0) USER(1) PR(2) NI(3) VIRT(4) RES(5) SHR(6) S(7) %CPU(8) %MEM(9) TIME+(10) ARGS(11+)
+            if parts.len() >= 12 {
                 let pid = parts[0].to_string();
-                let name = parts.last().unwrap_or(&"").to_string();
+                let name = parts[11..].join(" "); // ARGS can contain spaces
 
-                // CPU% and MEM% positions vary; common layout has them at indices 8 and 9
-                let cpu_pct = parts
-                    .iter()
-                    .rev()
-                    .skip(1) // skip name
-                    .find_map(|s| s.trim_end_matches('%').parse::<f64>().ok())
+                let raw_cpu = parts.get(8)
+                    .and_then(|s| s.parse::<f64>().ok())
                     .unwrap_or(0.0);
+                let mem_pct = parts.get(9)
+                    .and_then(|s| s.parse::<f64>().ok())
+                    .unwrap_or(0.0);
+
+                // Normalize per-process CPU by total cores (total_cpu = num_cores * 100)
+                let normalized_cpu = if total_cpu > 0.0 {
+                    (raw_cpu / total_cpu * 100.0).clamp(0.0, 100.0)
+                } else {
+                    raw_cpu.clamp(0.0, 100.0)
+                };
 
                 processes.push(ProcessInfo {
                     pid,
                     user: parts.get(1).unwrap_or(&"").to_string(),
                     name,
-                    cpu_percent: cpu_pct,
-                    mem_percent: 0.0,
+                    cpu_percent: normalized_cpu,
+                    mem_percent: mem_pct,
+                    res: parts.get(5).unwrap_or(&"").to_string(),
+                    state: parts.get(7).unwrap_or(&"").to_string(),
+                    time: parts.get(10).unwrap_or(&"").to_string(),
                 });
             }
         }

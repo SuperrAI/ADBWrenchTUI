@@ -4,7 +4,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
-use crate::app::App;
+use crate::app::{App, LogcatControl, LogcatFocus};
 use crate::adb::types::LogLevel;
 use crate::components::{render_keybinding_footer, truncate_str};
 use crate::theme::Theme;
@@ -13,7 +13,8 @@ use crate::theme::Theme;
 pub fn render(app: &App, frame: &mut Frame, area: Rect) {
     let chunks = Layout::vertical([
         Constraint::Length(2), // header
-        Constraint::Length(1), // filter bar
+        Constraint::Length(1), // control bar
+        Constraint::Length(1), // search/tag display
         Constraint::Min(0),   // log area
         Constraint::Length(1), // footer
     ])
@@ -22,14 +23,15 @@ pub fn render(app: &App, frame: &mut Frame, area: Rect) {
     render_header(app, frame, chunks[0]);
 
     if !app.device_manager.is_connected() {
-        super::render_disconnected(frame, chunks[2]);
-        render_footer(frame, chunks[3]);
+        super::render_disconnected(frame, chunks[3]);
+        render_footer(frame, chunks[4]);
         return;
     }
 
-    render_filter_bar(app, frame, chunks[1]);
-    render_logs(app, frame, chunks[2]);
-    render_footer(frame, chunks[3]);
+    render_control_bar(app, frame, chunks[1]);
+    render_filter_display(app, frame, chunks[2]);
+    render_logs(app, frame, chunks[3]);
+    render_footer(frame, chunks[4]);
 }
 
 /// Header with event count, buffer name, and LIVE indicator.
@@ -63,92 +65,109 @@ fn render_header(app: &App, frame: &mut Frame, area: Rect) {
     );
 }
 
-/// Filter bar with search, tag, level toggles, time/auto toggles.
-fn render_filter_bar(app: &App, frame: &mut Frame, area: Rect) {
-    let cols = Layout::horizontal([
-        Constraint::Min(0),       // search/tag area
-        Constraint::Length(30),   // level + toggles
-    ])
-    .split(area);
+/// Render the focusable control bar with all logcat controls.
+fn render_control_bar(app: &App, frame: &mut Frame, area: Rect) {
+    let is_bar_focused = app.logcat.focus == LogcatFocus::Controls
+        && !app.logcat.search_active
+        && !app.logcat.tag_active;
+    let selected = app.logcat.control_index;
 
-    // Search and tag display
-    let search_tag_area = cols[0];
-    let mut filter_spans = vec![Span::raw(" ")];
+    let mut spans: Vec<Span> = vec![Span::raw(" ")];
+
+    for (i, ctrl) in LogcatControl::ALL.iter().enumerate() {
+        let is_sel = is_bar_focused && i == selected;
+
+        let (label, active) = match ctrl {
+            LogcatControl::StartStop => {
+                if app.logcat.is_streaming { ("STOP", true) } else { ("START", false) }
+            }
+            LogcatControl::Buffer => (app.logcat.buffer.label(), false),
+            LogcatControl::Search => ("SEARCH", !app.logcat.search_query.is_empty()),
+            LogcatControl::Tag => ("TAG", !app.logcat.tag_filter.is_empty()),
+            LogcatControl::LevelV => ("V", app.logcat.level_filter[0]),
+            LogcatControl::LevelD => ("D", app.logcat.level_filter[1]),
+            LogcatControl::LevelI => ("I", app.logcat.level_filter[2]),
+            LogcatControl::LevelW => ("W", app.logcat.level_filter[3]),
+            LogcatControl::LevelE => ("E", app.logcat.level_filter[4]),
+            LogcatControl::LevelF => ("F", app.logcat.level_filter[5]),
+            LogcatControl::Timestamp => ("TIME", app.logcat.show_timestamp),
+            LogcatControl::AutoScroll => ("AUTO", app.logcat.auto_scroll),
+            LogcatControl::Clear => ("CLR", false),
+        };
+
+        // Color coding for level buttons
+        let level_color = match ctrl {
+            LogcatControl::LevelV => Some(Theme::LOG_VERBOSE),
+            LogcatControl::LevelD => Some(Theme::LOG_DEBUG),
+            LogcatControl::LevelI => Some(Theme::LOG_INFO),
+            LogcatControl::LevelW => Some(Theme::LOG_WARN),
+            LogcatControl::LevelE => Some(Theme::LOG_ERROR),
+            LogcatControl::LevelF => Some(Theme::LOG_FATAL),
+            _ => None,
+        };
+
+        let style = if is_sel {
+            Theme::accent_bold()
+        } else if let Some(lc) = level_color {
+            if active { Style::default().fg(lc) } else { Theme::muted() }
+        } else if active {
+            Theme::accent()
+        } else {
+            Theme::muted()
+        };
+
+        let bracket_style = if is_sel { Theme::accent_bold() } else { Theme::muted() };
+
+        if is_sel {
+            spans.push(Span::styled("▸", Theme::accent()));
+        }
+        spans.push(Span::styled("[", bracket_style));
+        spans.push(Span::styled(label, style));
+        spans.push(Span::styled("]", bracket_style));
+        spans.push(Span::raw(" "));
+    }
+
+    frame.render_widget(
+        Paragraph::new(Line::from(spans)).style(Style::default().bg(Theme::BG)),
+        area,
+    );
+}
+
+/// Show active search/tag filter values below the control bar.
+fn render_filter_display(app: &App, frame: &mut Frame, area: Rect) {
+    let mut spans: Vec<Span> = vec![Span::raw(" ")];
 
     // Search
     if app.logcat.search_active {
-        filter_spans.push(Span::styled("SEARCH:", Theme::accent()));
-        filter_spans.push(Span::styled(
+        spans.push(Span::styled("SEARCH: ", Theme::accent()));
+        spans.push(Span::styled(
             format!("{}\u{2588}", app.logcat.search_query),
             Theme::text(),
         ));
     } else if !app.logcat.search_query.is_empty() {
-        filter_spans.push(Span::styled("SEARCH:", Theme::dim()));
-        filter_spans.push(Span::styled(app.logcat.search_query.clone(), Theme::text()));
-    } else {
-        filter_spans.push(Span::styled("/search", Theme::muted()));
+        spans.push(Span::styled("SEARCH: ", Theme::dim()));
+        spans.push(Span::styled(app.logcat.search_query.clone(), Theme::text()));
     }
 
-    filter_spans.push(Span::raw("  "));
+    if !spans.is_empty() && (!app.logcat.search_query.is_empty() || app.logcat.search_active) {
+        spans.push(Span::raw("  "));
+    }
 
     // Tag
     if app.logcat.tag_active {
-        filter_spans.push(Span::styled("TAG:", Theme::accent()));
-        filter_spans.push(Span::styled(
+        spans.push(Span::styled("TAG: ", Theme::accent()));
+        spans.push(Span::styled(
             format!("{}\u{2588}", app.logcat.tag_filter),
             Theme::text(),
         ));
     } else if !app.logcat.tag_filter.is_empty() {
-        filter_spans.push(Span::styled("TAG:", Theme::dim()));
-        filter_spans.push(Span::styled(app.logcat.tag_filter.clone(), Theme::text()));
+        spans.push(Span::styled("TAG: ", Theme::dim()));
+        spans.push(Span::styled(app.logcat.tag_filter.clone(), Theme::text()));
     }
 
     frame.render_widget(
-        Paragraph::new(Line::from(filter_spans)).style(Style::default().bg(Theme::BG)),
-        search_tag_area,
-    );
-
-    // Level toggles + TIME + AUTO
-    let level_labels = ["V", "D", "I", "W", "E", "F"];
-    let level_colors = [
-        Theme::LOG_VERBOSE,
-        Theme::LOG_DEBUG,
-        Theme::LOG_INFO,
-        Theme::LOG_WARN,
-        Theme::LOG_ERROR,
-        Theme::LOG_FATAL,
-    ];
-
-    let mut toggle_spans = vec![Span::raw(" ")];
-    for (i, (label, color)) in level_labels.iter().zip(level_colors.iter()).enumerate() {
-        let style = if app.logcat.level_filter[i] {
-            Style::default().fg(*color)
-        } else {
-            Theme::muted()
-        };
-        toggle_spans.push(Span::styled(format!("[{label}]"), style));
-    }
-
-    toggle_spans.push(Span::raw(" "));
-
-    // TIME toggle
-    if app.logcat.show_timestamp {
-        toggle_spans.push(Span::styled("[TIME]", Theme::accent()));
-    } else {
-        toggle_spans.push(Span::styled("[TIME]", Theme::muted()));
-    }
-
-    // AUTO toggle
-    toggle_spans.push(Span::raw(" "));
-    if app.logcat.auto_scroll {
-        toggle_spans.push(Span::styled("[AUTO]", Theme::accent()));
-    } else {
-        toggle_spans.push(Span::styled("[AUTO]", Theme::muted()));
-    }
-
-    frame.render_widget(
-        Paragraph::new(Line::from(toggle_spans)).style(Style::default().bg(Theme::BG)),
-        cols[1],
+        Paragraph::new(Line::from(spans)).style(Style::default().bg(Theme::BG)),
+        area,
     );
 }
 
@@ -158,7 +177,6 @@ fn render_logs(app: &App, frame: &mut Frame, area: Rect) {
 
     // Apply filters
     let filtered: Vec<_> = app.logcat.logs.iter().filter(|entry| {
-        // Level filter
         let level_idx = match entry.level {
             LogLevel::Verbose => 0,
             LogLevel::Debug => 1,
@@ -170,13 +188,11 @@ fn render_logs(app: &App, frame: &mut Frame, area: Rect) {
         if !app.logcat.level_filter[level_idx] {
             return false;
         }
-        // Tag filter
         if !app.logcat.tag_filter.is_empty()
             && !entry.tag.to_lowercase().contains(&app.logcat.tag_filter.to_lowercase())
         {
             return false;
         }
-        // Search filter
         if !app.logcat.search_query.is_empty() {
             let query_lower = app.logcat.search_query.to_lowercase();
             if !entry.message.to_lowercase().contains(&query_lower)
@@ -190,7 +206,7 @@ fn render_logs(app: &App, frame: &mut Frame, area: Rect) {
 
     if filtered.is_empty() {
         let msg = if app.logcat.logs.is_empty() {
-            "Press s to start logcat"
+            "Navigate to START and press Enter"
         } else {
             "No entries match filters"
         };
@@ -227,7 +243,6 @@ fn render_logs(app: &App, frame: &mut Frame, area: Rect) {
         let mut spans = Vec::new();
         spans.push(Span::raw(" "));
 
-        // Optional timestamp
         if app.logcat.show_timestamp && !entry.timestamp.is_empty() {
             spans.push(Span::styled(
                 truncate_str(&entry.timestamp, 18),
@@ -236,14 +251,12 @@ fn render_logs(app: &App, frame: &mut Frame, area: Rect) {
             spans.push(Span::raw(" "));
         }
 
-        // Level letter
         spans.push(Span::styled(
             entry.level.label(),
             Style::default().fg(level_color),
         ));
         spans.push(Span::raw(" "));
 
-        // Tag (truncated)
         let tag_max = 20.min(available_width / 4);
         if !entry.tag.is_empty() {
             spans.push(Span::styled(
@@ -253,7 +266,6 @@ fn render_logs(app: &App, frame: &mut Frame, area: Rect) {
             spans.push(Span::styled(": ", Theme::muted()));
         }
 
-        // Message (fill remaining width)
         let used_width: usize = spans.iter().map(|s| s.content.len()).sum();
         let msg_max = available_width.saturating_sub(used_width);
         spans.push(Span::styled(
@@ -264,7 +276,6 @@ fn render_logs(app: &App, frame: &mut Frame, area: Rect) {
         lines.push(Line::from(spans));
     }
 
-    // Fill remaining
     while lines.len() < visible_height {
         lines.push(Line::from(""));
     }
@@ -278,12 +289,10 @@ fn render_logs(app: &App, frame: &mut Frame, area: Rect) {
 /// Footer with keybinding hints.
 fn render_footer(frame: &mut Frame, area: Rect) {
     render_keybinding_footer(frame, area, &[
-        ("s", "start/stop"),
-        ("b", "buffer"),
-        ("v/d/i/w/e/f", "levels"),
-        ("/", "search"),
-        ("t", "time"),
-        ("a", "auto"),
-        ("c", "clear"),
+        ("Tab", "focus"),
+        ("←/→", "control"),
+        ("Enter", "activate"),
+        ("j/k", "scroll"),
+        ("g/G", "top/bottom"),
     ]);
 }

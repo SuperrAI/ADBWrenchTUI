@@ -6,26 +6,6 @@ use ratatui::Frame;
 
 use crate::theme::Theme;
 
-// ── Card helpers ──────────────────────────────────────────────────
-
-/// Bordered card with rounded corners and a title.
-pub fn card_block(title: &str) -> Block<'_> {
-    Block::default()
-        .borders(Borders::ALL)
-        .border_style(Theme::border())
-        .border_type(BorderType::Rounded)
-        .title(Span::styled(format!(" {title} "), Theme::title()))
-        .style(Style::default().bg(Theme::BG))
-}
-
-/// Key-value line: " key: value".
-pub fn kv_line<'a>(key: &'a str, value: &'a str) -> Line<'a> {
-    Line::from(vec![
-        Span::styled(format!(" {key}: "), Theme::muted()),
-        Span::styled(value, Theme::text()),
-    ])
-}
-
 // ── Progress / gauge ─────────────────────────────────────────────
 
 /// Render a horizontal progress bar in a single-line area.

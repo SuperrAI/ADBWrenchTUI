@@ -123,38 +123,8 @@ impl LogcatBuffer {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PerfRefreshRate {
-    Sec1,
-    Sec2,
-    Sec5,
-}
-
-impl PerfRefreshRate {
-    pub fn label(&self) -> &str {
-        match self {
-            Self::Sec1 => "1S",
-            Self::Sec2 => "2S",
-            Self::Sec5 => "5S",
-        }
-    }
-
-    pub fn secs(&self) -> u64 {
-        match self {
-            Self::Sec1 => 1,
-            Self::Sec2 => 2,
-            Self::Sec5 => 5,
-        }
-    }
-
-    pub fn next(&self) -> Self {
-        match self {
-            Self::Sec1 => Self::Sec2,
-            Self::Sec2 => Self::Sec5,
-            Self::Sec5 => Self::Sec1,
-        }
-    }
-}
+/// Performance data refresh interval in seconds.
+const PERF_REFRESH_SECS: u64 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RecordDuration {
@@ -261,12 +231,44 @@ pub enum BugreportStatus {
 
 // ── Page state structs ───────────────────────────────────────────
 
+/// Dashboard focus section for Tab cycling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DashboardSection {
+    Device,
+    Hardware,
+    Software,
+    Processes,
+}
+
+impl DashboardSection {
+    pub fn next(self) -> Self {
+        match self {
+            Self::Device => Self::Hardware,
+            Self::Hardware => Self::Software,
+            Self::Software => Self::Processes,
+            Self::Processes => Self::Device,
+        }
+    }
+
+    pub fn prev(self) -> Self {
+        match self {
+            Self::Device => Self::Processes,
+            Self::Hardware => Self::Device,
+            Self::Software => Self::Hardware,
+            Self::Processes => Self::Software,
+        }
+    }
+}
+
 /// Dashboard-specific state.
 pub struct DashboardState {
     pub loading: bool,
     pub last_refresh: Option<Instant>,
     pub auto_refresh: RefreshInterval,
     pub error: Option<String>,
+    pub focus_section: DashboardSection,
+    pub focus_item: usize,
+    pub copied_feedback: Option<(String, Instant)>,
 }
 
 /// Shell output entry type.
@@ -298,6 +300,57 @@ pub struct ShellState {
     pub stream_rx: Option<mpsc::UnboundedReceiver<String>>,
 }
 
+/// Logcat focus area.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogcatFocus {
+    Controls,
+    Logs,
+}
+
+/// Logcat control bar items.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogcatControl {
+    StartStop,
+    Buffer,
+    Search,
+    Tag,
+    LevelV,
+    LevelD,
+    LevelI,
+    LevelW,
+    LevelE,
+    LevelF,
+    Timestamp,
+    AutoScroll,
+    Clear,
+}
+
+impl LogcatControl {
+    pub const ALL: &[LogcatControl] = &[
+        Self::StartStop,
+        Self::Buffer,
+        Self::Search,
+        Self::Tag,
+        Self::LevelV,
+        Self::LevelD,
+        Self::LevelI,
+        Self::LevelW,
+        Self::LevelE,
+        Self::LevelF,
+        Self::Timestamp,
+        Self::AutoScroll,
+        Self::Clear,
+    ];
+
+    pub fn next_idx(idx: usize) -> usize {
+        (idx + 1) % Self::ALL.len()
+    }
+
+    pub fn prev_idx(idx: usize) -> usize {
+        if idx == 0 { Self::ALL.len() - 1 } else { idx - 1 }
+    }
+}
+
 /// Logcat page state.
 pub struct LogcatState {
     pub logs: Vec<LogEntry>,
@@ -312,6 +365,8 @@ pub struct LogcatState {
     pub search_active: bool,
     pub tag_active: bool,
     pub stream_rx: Option<mpsc::UnboundedReceiver<String>>,
+    pub focus: LogcatFocus,
+    pub control_index: usize,
 }
 
 /// Controls page state.
@@ -330,8 +385,6 @@ pub struct ControlsState {
 
 /// Performance page state.
 pub struct PerfState {
-    pub is_monitoring: bool,
-    pub refresh_rate: PerfRefreshRate,
     pub cpu_history: Vec<f64>,
     pub mem_history: Vec<f64>,
     pub mem_total_kb: u64,
@@ -350,8 +403,6 @@ pub struct FilesState {
     pub selected_files: HashSet<String>,
     pub loading: bool,
     pub error: Option<String>,
-    pub mkdir_input: String,
-    pub mkdir_cursor_pos: usize,
 }
 
 /// Apps page panel focus.
@@ -387,8 +438,6 @@ pub struct PackageDetails {
     pub installed_path: String,
     pub first_install_time: String,
     pub last_update_time: String,
-    pub is_system: bool,
-    pub is_enabled: bool,
     pub permissions: Vec<String>,
 }
 
@@ -423,7 +472,6 @@ pub struct SettingsState {
 /// Quick toggle definition.
 pub struct QuickToggle {
     pub name: &'static str,
-    pub description: &'static str,
     pub namespace: &'static str,
     pub key: &'static str,
     pub enable_value: &'static str,
@@ -431,12 +479,12 @@ pub struct QuickToggle {
 }
 
 pub const QUICK_TOGGLES: &[QuickToggle] = &[
-    QuickToggle { name: "WIRELESS ADB", description: "ADB over WiFi", namespace: "global", key: "adb_wifi_enabled", enable_value: "1", disable_value: "0" },
-    QuickToggle { name: "SHOW TOUCHES", description: "Show touch points", namespace: "system", key: "show_touches", enable_value: "1", disable_value: "0" },
-    QuickToggle { name: "POINTER LOC", description: "Pointer location", namespace: "system", key: "pointer_location", enable_value: "1", disable_value: "0" },
-    QuickToggle { name: "STAY AWAKE", description: "Stay on while plugged", namespace: "global", key: "stay_on_while_plugged_in", enable_value: "3", disable_value: "0" },
-    QuickToggle { name: "GPU DEBUG", description: "GPU debug layers", namespace: "global", key: "enable_gpu_debug_layers", enable_value: "1", disable_value: "0" },
-    QuickToggle { name: "ANIM SCALE", description: "Animator scale", namespace: "global", key: "animator_duration_scale", enable_value: "1.0", disable_value: "0" },
+    QuickToggle { name: "WIRELESS ADB", namespace: "global", key: "adb_wifi_enabled", enable_value: "1", disable_value: "0" },
+    QuickToggle { name: "SHOW TOUCHES", namespace: "system", key: "show_touches", enable_value: "1", disable_value: "0" },
+    QuickToggle { name: "POINTER LOC", namespace: "system", key: "pointer_location", enable_value: "1", disable_value: "0" },
+    QuickToggle { name: "STAY AWAKE", namespace: "global", key: "stay_on_while_plugged_in", enable_value: "3", disable_value: "0" },
+    QuickToggle { name: "GPU DEBUG", namespace: "global", key: "enable_gpu_debug_layers", enable_value: "1", disable_value: "0" },
+    QuickToggle { name: "ANIM SCALE", namespace: "global", key: "animator_duration_scale", enable_value: "1.0", disable_value: "0" },
 ];
 
 /// Bugreport history entry.
@@ -466,7 +514,6 @@ pub struct BugreportState {
 #[derive(Debug, Clone)]
 pub struct ScreenCapture {
     pub filename: String,
-    pub local_path: String,
     pub timestamp: String,
 }
 
@@ -474,7 +521,6 @@ pub struct ScreenCapture {
 #[derive(Debug, Clone)]
 pub struct RecordingEntry {
     pub filename: String,
-    pub local_path: String,
     pub duration_secs: u32,
     pub timestamp: String,
 }
@@ -531,13 +577,10 @@ pub enum AppAction {
     None,
     // Shell
     ShellExecute(String),
-    ShellExecuteStream(String),
     ShellStop,
     // Logcat
     LogcatStart,
     LogcatStop,
-    // Performance
-    PerfCollect,
     // Files
     FilesNavigate(String),
     FilesRefresh,
@@ -580,7 +623,6 @@ pub enum Page {
     Apps,
     Files,
     Controls,
-    Performance,
     Bugreport,
     Settings,
 }
@@ -594,7 +636,6 @@ impl Page {
         Page::Apps,
         Page::Files,
         Page::Controls,
-        Page::Performance,
         Page::Bugreport,
         Page::Settings,
     ];
@@ -608,24 +649,8 @@ impl Page {
             Self::Apps => "Apps",
             Self::Files => "Files",
             Self::Controls => "Controls",
-            Self::Performance => "Perf",
             Self::Bugreport => "Bugreport",
             Self::Settings => "Settings",
-        }
-    }
-
-    pub fn icon(&self) -> &str {
-        match self {
-            Self::Dashboard => "◉",
-            Self::Shell => ">_",
-            Self::Logcat => "☰",
-            Self::Screen => "◻",
-            Self::Apps => "▦",
-            Self::Files => "🗁",
-            Self::Controls => "⚙",
-            Self::Performance => "▃",
-            Self::Bugreport => "🐛",
-            Self::Settings => "⚡",
         }
     }
 
@@ -634,7 +659,7 @@ impl Page {
         match self {
             Self::Dashboard => "MAIN",
             Self::Shell | Self::Logcat | Self::Screen | Self::Apps | Self::Files => "TOOLS",
-            Self::Controls | Self::Performance | Self::Bugreport | Self::Settings => "SYSTEM",
+            Self::Controls | Self::Bugreport | Self::Settings => "SYSTEM",
         }
     }
 
@@ -648,9 +673,8 @@ impl Page {
             Self::Apps => '5',
             Self::Files => '6',
             Self::Controls => '7',
-            Self::Performance => '8',
-            Self::Bugreport => '9',
-            Self::Settings => '0',
+            Self::Bugreport => '8',
+            Self::Settings => '9',
         }
     }
 }
@@ -703,6 +727,9 @@ impl App {
                 last_refresh: None,
                 auto_refresh: RefreshInterval::Seconds10,
                 error: None,
+                focus_section: DashboardSection::Device,
+                focus_item: 0,
+                copied_feedback: None,
             },
             shell: ShellState {
                 input: String::new(),
@@ -729,6 +756,8 @@ impl App {
                 search_active: false,
                 tag_active: false,
                 stream_rx: None,
+                focus: LogcatFocus::Controls,
+                control_index: 0,
             },
             controls: ControlsState {
                 focus_section: 0,
@@ -743,8 +772,6 @@ impl App {
                 text_cursor_pos: 0,
             },
             performance: PerfState {
-                is_monitoring: false,
-                refresh_rate: PerfRefreshRate::Sec2,
                 cpu_history: Vec::new(),
                 mem_history: Vec::new(),
                 mem_total_kb: 0,
@@ -761,8 +788,6 @@ impl App {
                 selected_files: HashSet::new(),
                 loading: false,
                 error: None,
-                mkdir_input: String::new(),
-                mkdir_cursor_pos: 0,
             },
             apps: AppsState {
                 packages: Vec::new(),
@@ -862,7 +887,7 @@ impl App {
             // Pages with internal sections handle Tab/BackTab themselves (fall through).
             // Other pages: Tab/BackTab returns to sidebar.
             match self.page {
-                Page::Controls | Page::Apps | Page::Settings => {
+                Page::Dashboard | Page::Logcat | Page::Controls | Page::Apps | Page::Settings => {
                     // Fall through to page handler for internal Tab cycling
                 }
                 _ => {
@@ -943,6 +968,96 @@ impl App {
             Page::Apps => self.apps.search_active,
             Page::Settings => self.settings.search_active,
             _ => false,
+        }
+    }
+
+    // ── Mouse handling ────────────────────────────────────────────
+
+    /// Handle mouse events (scroll wheel for scrollable areas).
+    pub fn handle_mouse(&mut self, mouse: crossterm::event::MouseEvent) {
+        use crossterm::event::MouseEventKind;
+
+        match mouse.kind {
+            MouseEventKind::ScrollUp => self.handle_scroll(-3),
+            MouseEventKind::ScrollDown => self.handle_scroll(3),
+            _ => {}
+        }
+    }
+
+    /// Apply a scroll delta to the current page's scrollable area.
+    fn handle_scroll(&mut self, delta: i32) {
+        match self.page {
+            Page::Dashboard => {
+                if self.dashboard.focus_section == DashboardSection::Processes {
+                    let max = self.performance.processes.len().saturating_sub(1);
+                    if delta < 0 {
+                        self.dashboard.focus_item =
+                            self.dashboard.focus_item.saturating_sub(delta.unsigned_abs() as usize);
+                    } else {
+                        self.dashboard.focus_item =
+                            (self.dashboard.focus_item + delta as usize).min(max);
+                    }
+                }
+            }
+            Page::Logcat => {
+                if delta < 0 {
+                    self.logcat.scroll_offset =
+                        self.logcat.scroll_offset.saturating_sub(delta.unsigned_abs() as usize);
+                } else {
+                    self.logcat.scroll_offset += delta as usize;
+                }
+                self.logcat.auto_scroll = false;
+            }
+            Page::Shell => {
+                if delta < 0 {
+                    self.shell.scroll_offset =
+                        self.shell.scroll_offset.saturating_add(delta.unsigned_abs() as usize);
+                } else {
+                    self.shell.scroll_offset =
+                        self.shell.scroll_offset.saturating_sub(delta as usize);
+                }
+            }
+            Page::Files => {
+                let max = self.files.entries.len().saturating_sub(1);
+                if delta < 0 {
+                    self.files.selected_index =
+                        self.files.selected_index.saturating_sub(delta.unsigned_abs() as usize);
+                } else {
+                    self.files.selected_index =
+                        (self.files.selected_index + delta as usize).min(max);
+                }
+            }
+            Page::Apps => {
+                let max = self.apps.packages.len().saturating_sub(1);
+                if delta < 0 {
+                    self.apps.selected_index =
+                        self.apps.selected_index.saturating_sub(delta.unsigned_abs() as usize);
+                } else {
+                    self.apps.selected_index =
+                        (self.apps.selected_index + delta as usize).min(max);
+                }
+            }
+            Page::Settings => {
+                let max = self.settings.settings.len().saturating_sub(1);
+                if delta < 0 {
+                    self.settings.selected_index =
+                        self.settings.selected_index.saturating_sub(delta.unsigned_abs() as usize);
+                } else {
+                    self.settings.selected_index =
+                        (self.settings.selected_index + delta as usize).min(max);
+                }
+            }
+            Page::Bugreport => {
+                let max = self.bugreport.history.len().saturating_sub(1);
+                if delta < 0 {
+                    self.bugreport.selected_index =
+                        self.bugreport.selected_index.saturating_sub(delta.unsigned_abs() as usize);
+                } else {
+                    self.bugreport.selected_index =
+                        (self.bugreport.selected_index + delta as usize).min(max);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -1055,14 +1170,10 @@ impl App {
         }
 
         match self.page {
-            Page::Dashboard => {
-                self.handle_dashboard_key(key);
-                AppAction::None
-            }
+            Page::Dashboard => self.handle_dashboard_key(key),
             Page::Shell => self.handle_shell_key(key),
             Page::Logcat => self.handle_logcat_key(key),
             Page::Controls => self.handle_controls_key(key),
-            Page::Performance => self.handle_performance_key(key),
             Page::Files => self.handle_files_key(key),
             Page::Apps => self.handle_apps_key(key),
             Page::Settings => self.handle_settings_key(key),
@@ -1071,17 +1182,161 @@ impl App {
         }
     }
 
-    fn handle_dashboard_key(&mut self, key: KeyEvent) -> bool {
+    fn handle_dashboard_key(&mut self, key: KeyEvent) -> AppAction {
         match key.code {
+            // Section cycling
+            KeyCode::Tab => {
+                self.dashboard.focus_section = self.dashboard.focus_section.next();
+                self.dashboard.focus_item = 0;
+                self.performance.scroll_offset = 0;
+                AppAction::None
+            }
+            KeyCode::BackTab => {
+                self.dashboard.focus_section = self.dashboard.focus_section.prev();
+                self.dashboard.focus_item = 0;
+                self.performance.scroll_offset = 0;
+                AppAction::None
+            }
+            // Item navigation / process scrolling
+            KeyCode::Up | KeyCode::Char('k') => {
+                if self.dashboard.focus_section == DashboardSection::Processes {
+                    self.dashboard.focus_item = self.dashboard.focus_item.saturating_sub(1);
+                    // Scroll to keep selection visible
+                    if self.dashboard.focus_item < self.performance.scroll_offset {
+                        self.performance.scroll_offset = self.dashboard.focus_item;
+                    }
+                } else {
+                    self.dashboard.focus_item = self.dashboard.focus_item.saturating_sub(1);
+                }
+                AppAction::None
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if self.dashboard.focus_section == DashboardSection::Processes {
+                    let max = self.performance.processes.len().saturating_sub(1);
+                    self.dashboard.focus_item = (self.dashboard.focus_item + 1).min(max);
+                } else {
+                    let max = match self.dashboard.focus_section {
+                        DashboardSection::Device => 3,
+                        DashboardSection::Hardware | DashboardSection::Software => 4,
+                        DashboardSection::Processes => unreachable!(),
+                    };
+                    self.dashboard.focus_item = (self.dashboard.focus_item + 1).min(max);
+                }
+                AppAction::None
+            }
+            // Home / End for process list
+            KeyCode::Home | KeyCode::Char('g') => {
+                if self.dashboard.focus_section == DashboardSection::Processes {
+                    self.dashboard.focus_item = 0;
+                    self.performance.scroll_offset = 0;
+                }
+                AppAction::None
+            }
+            KeyCode::End | KeyCode::Char('G') => {
+                if self.dashboard.focus_section == DashboardSection::Processes {
+                    self.dashboard.focus_item = self.performance.processes.len().saturating_sub(1);
+                }
+                AppAction::None
+            }
+            // Copy focused value to clipboard
+            KeyCode::Char('c') => {
+                if let Some(value) = self.get_dashboard_focused_value() {
+                    self.copy_to_clipboard(&value);
+                    self.dashboard.copied_feedback =
+                        Some((value, Instant::now()));
+                }
+                AppAction::None
+            }
             KeyCode::Char('r') => {
                 self.dashboard.last_refresh = None;
-                true
+                AppAction::None
             }
             KeyCode::Char('a') => {
                 self.dashboard.auto_refresh = self.dashboard.auto_refresh.next();
-                true
+                AppAction::None
             }
-            _ => false,
+            _ => AppAction::None,
+        }
+    }
+
+    /// Get the value of the currently focused dashboard item.
+    fn get_dashboard_focused_value(&self) -> Option<String> {
+        match self.dashboard.focus_section {
+            DashboardSection::Processes => {
+                let p = self.performance.processes.get(self.dashboard.focus_item)?;
+                Some(p.name.clone())
+            }
+            _ => {
+                let info = self.device_manager.full_info.as_ref()?;
+                match self.dashboard.focus_section {
+                    DashboardSection::Device => {
+                        let id = &info.identity;
+                        match self.dashboard.focus_item {
+                            0 => Some(id.model.clone()),
+                            1 => Some(id.manufacturer.clone()),
+                            2 => Some(id.device.clone()),
+                            3 => Some(id.serial.clone()),
+                            _ => None,
+                        }
+                    }
+                    DashboardSection::Hardware => {
+                        let hw = &info.hardware;
+                        match self.dashboard.focus_item {
+                            0 => Some(hw.hardware_platform.clone()),
+                            1 => Some(hw.cpu_architecture.clone()),
+                            2 => Some(hw.total_ram.clone()),
+                            3 => Some(hw.display_resolution.clone()),
+                            4 => Some(hw.display_density.clone()),
+                            _ => None,
+                        }
+                    }
+                    DashboardSection::Software => {
+                        let b = &info.build;
+                        match self.dashboard.focus_item {
+                            0 => Some(b.android_version.clone()),
+                            1 => Some(b.sdk_level.clone()),
+                            2 => Some(b.security_patch.clone()),
+                            3 => Some(b.build_date.clone()),
+                            4 => Some(b.build_fingerprint.clone()),
+                            _ => None,
+                        }
+                    }
+                    DashboardSection::Processes => unreachable!(),
+                }
+            }
+        }
+    }
+
+    /// Copy text to the system clipboard.
+    fn copy_to_clipboard(&self, text: &str) {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+
+        let result = if cfg!(target_os = "macos") {
+            Command::new("pbcopy")
+                .stdin(Stdio::piped())
+                .spawn()
+                .and_then(|mut child| {
+                    if let Some(ref mut stdin) = child.stdin {
+                        stdin.write_all(text.as_bytes())?;
+                    }
+                    child.wait()
+                })
+        } else {
+            Command::new("xclip")
+                .args(["-selection", "clipboard"])
+                .stdin(Stdio::piped())
+                .spawn()
+                .and_then(|mut child| {
+                    if let Some(ref mut stdin) = child.stdin {
+                        stdin.write_all(text.as_bytes())?;
+                    }
+                    child.wait()
+                })
+        };
+
+        if let Err(e) = result {
+            tracing::warn!("Failed to copy to clipboard: {e}");
         }
     }
 
@@ -1215,12 +1470,12 @@ impl App {
     }
 
     fn handle_logcat_key(&mut self, key: KeyEvent) -> AppAction {
-        // Handle text input modes
+        // Text input modes capture all keys
         if self.logcat.search_active {
-            return self.handle_logcat_search_input(key);
+            return self.handle_logcat_text_input(key, true);
         }
         if self.logcat.tag_active {
-            return self.handle_logcat_tag_input(key);
+            return self.handle_logcat_text_input(key, false);
         }
 
         // Ctrl+C stops streaming
@@ -1232,36 +1487,83 @@ impl App {
         }
 
         match key.code {
-            KeyCode::Char('s') => {
-                if self.logcat.is_streaming {
-                    AppAction::LogcatStop
-                } else {
-                    AppAction::LogcatStart
+            // Tab/BackTab cycles between Controls bar and Logs area
+            KeyCode::Tab => {
+                self.logcat.focus = match self.logcat.focus {
+                    LogcatFocus::Controls => LogcatFocus::Logs,
+                    LogcatFocus::Logs => LogcatFocus::Controls,
+                };
+                AppAction::None
+            }
+            KeyCode::BackTab => {
+                self.logcat.focus = match self.logcat.focus {
+                    LogcatFocus::Controls => LogcatFocus::Logs,
+                    LogcatFocus::Logs => LogcatFocus::Controls,
+                };
+                AppAction::None
+            }
+            _ => {
+                match self.logcat.focus {
+                    LogcatFocus::Controls => self.handle_logcat_controls_key(key),
+                    LogcatFocus::Logs => self.handle_logcat_logs_key(key),
                 }
             }
-            KeyCode::Char('b') => {
+        }
+    }
+
+    /// Handle keys when the control bar is focused.
+    fn handle_logcat_controls_key(&mut self, key: KeyEvent) -> AppAction {
+        match key.code {
+            KeyCode::Left | KeyCode::Char('h') => {
+                self.logcat.control_index = LogcatControl::prev_idx(self.logcat.control_index);
+                AppAction::None
+            }
+            KeyCode::Right | KeyCode::Char('l') => {
+                self.logcat.control_index = LogcatControl::next_idx(self.logcat.control_index);
+                AppAction::None
+            }
+            KeyCode::Enter | KeyCode::Char(' ') => {
+                self.activate_logcat_control()
+            }
+            _ => AppAction::None,
+        }
+    }
+
+    /// Activate the currently highlighted logcat control button.
+    fn activate_logcat_control(&mut self) -> AppAction {
+        match LogcatControl::ALL[self.logcat.control_index] {
+            LogcatControl::StartStop => {
+                if self.logcat.is_streaming { AppAction::LogcatStop } else { AppAction::LogcatStart }
+            }
+            LogcatControl::Buffer => {
                 if !self.logcat.is_streaming {
                     self.logcat.buffer = self.logcat.buffer.next();
                 }
                 AppAction::None
             }
-            KeyCode::Char('v') => { self.logcat.level_filter[0] = !self.logcat.level_filter[0]; AppAction::None }
-            KeyCode::Char('d') => { self.logcat.level_filter[1] = !self.logcat.level_filter[1]; AppAction::None }
-            KeyCode::Char('i') => { self.logcat.level_filter[2] = !self.logcat.level_filter[2]; AppAction::None }
-            KeyCode::Char('w') => { self.logcat.level_filter[3] = !self.logcat.level_filter[3]; AppAction::None }
-            KeyCode::Char('e') => { self.logcat.level_filter[4] = !self.logcat.level_filter[4]; AppAction::None }
-            KeyCode::Char('f') => { self.logcat.level_filter[5] = !self.logcat.level_filter[5]; AppAction::None }
-            KeyCode::Char('/') => { self.logcat.search_active = true; AppAction::None }
-            KeyCode::Char('T') => { self.logcat.tag_active = true; AppAction::None }
-            KeyCode::Char('t') => { self.logcat.show_timestamp = !self.logcat.show_timestamp; AppAction::None }
-            KeyCode::Char('a') => { self.logcat.auto_scroll = !self.logcat.auto_scroll; AppAction::None }
-            KeyCode::Char('c') => { self.logcat.logs.clear(); self.logcat.scroll_offset = 0; AppAction::None }
-            KeyCode::Char('G') => { self.logcat.scroll_offset = 0; self.logcat.auto_scroll = true; AppAction::None }
-            KeyCode::Char('g') => {
-                self.logcat.auto_scroll = false;
-                self.logcat.scroll_offset = self.logcat.logs.len().saturating_sub(1);
+            LogcatControl::Search => {
+                self.logcat.search_active = true;
                 AppAction::None
             }
+            LogcatControl::Tag => {
+                self.logcat.tag_active = true;
+                AppAction::None
+            }
+            LogcatControl::LevelV => { self.logcat.level_filter[0] = !self.logcat.level_filter[0]; AppAction::None }
+            LogcatControl::LevelD => { self.logcat.level_filter[1] = !self.logcat.level_filter[1]; AppAction::None }
+            LogcatControl::LevelI => { self.logcat.level_filter[2] = !self.logcat.level_filter[2]; AppAction::None }
+            LogcatControl::LevelW => { self.logcat.level_filter[3] = !self.logcat.level_filter[3]; AppAction::None }
+            LogcatControl::LevelE => { self.logcat.level_filter[4] = !self.logcat.level_filter[4]; AppAction::None }
+            LogcatControl::LevelF => { self.logcat.level_filter[5] = !self.logcat.level_filter[5]; AppAction::None }
+            LogcatControl::Timestamp => { self.logcat.show_timestamp = !self.logcat.show_timestamp; AppAction::None }
+            LogcatControl::AutoScroll => { self.logcat.auto_scroll = !self.logcat.auto_scroll; AppAction::None }
+            LogcatControl::Clear => { self.logcat.logs.clear(); self.logcat.scroll_offset = 0; AppAction::None }
+        }
+    }
+
+    /// Handle keys when the log output area is focused (scrolling).
+    fn handle_logcat_logs_key(&mut self, key: KeyEvent) -> AppAction {
+        match key.code {
             KeyCode::Up | KeyCode::Char('k') => {
                 self.logcat.auto_scroll = false;
                 self.logcat.scroll_offset = self.logcat.scroll_offset.saturating_add(1);
@@ -1271,26 +1573,34 @@ impl App {
                 self.logcat.scroll_offset = self.logcat.scroll_offset.saturating_sub(1);
                 AppAction::None
             }
+            KeyCode::Char('G') => {
+                self.logcat.scroll_offset = 0;
+                self.logcat.auto_scroll = true;
+                AppAction::None
+            }
+            KeyCode::Char('g') => {
+                self.logcat.auto_scroll = false;
+                self.logcat.scroll_offset = self.logcat.logs.len().saturating_sub(1);
+                AppAction::None
+            }
             _ => AppAction::None,
         }
     }
 
-    fn handle_logcat_search_input(&mut self, key: KeyEvent) -> AppAction {
+    /// Handle text input for search or tag filter.
+    fn handle_logcat_text_input(&mut self, key: KeyEvent, is_search: bool) -> AppAction {
+        let (query, active) = if is_search {
+            (&mut self.logcat.search_query, &mut self.logcat.search_active)
+        } else {
+            (&mut self.logcat.tag_filter, &mut self.logcat.tag_active)
+        };
         match key.code {
-            KeyCode::Char(c) => { self.logcat.search_query.push(c); AppAction::None }
-            KeyCode::Backspace => { self.logcat.search_query.pop(); AppAction::None }
-            KeyCode::Enter | KeyCode::Esc => { self.logcat.search_active = false; AppAction::None }
-            _ => AppAction::None,
+            KeyCode::Char(c) => { query.push(c); }
+            KeyCode::Backspace => { query.pop(); }
+            KeyCode::Enter | KeyCode::Esc => { *active = false; }
+            _ => {}
         }
-    }
-
-    fn handle_logcat_tag_input(&mut self, key: KeyEvent) -> AppAction {
-        match key.code {
-            KeyCode::Char(c) => { self.logcat.tag_filter.push(c); AppAction::None }
-            KeyCode::Backspace => { self.logcat.tag_filter.pop(); AppAction::None }
-            KeyCode::Enter | KeyCode::Esc => { self.logcat.tag_active = false; AppAction::None }
-            _ => AppAction::None,
-        }
+        AppAction::None
     }
 
     fn handle_controls_key(&mut self, key: KeyEvent) -> AppAction {
@@ -1436,33 +1746,6 @@ impl App {
                     _ => return AppAction::None,
                 };
                 AppAction::ControlsExec(format!("input keyevent {keycode}"))
-            }
-            _ => AppAction::None,
-        }
-    }
-
-    fn handle_performance_key(&mut self, key: KeyEvent) -> AppAction {
-        match key.code {
-            KeyCode::Char('s') => {
-                self.performance.is_monitoring = !self.performance.is_monitoring;
-                if self.performance.is_monitoring {
-                    self.performance.last_collect = None; // Force immediate collect
-                    AppAction::PerfCollect
-                } else {
-                    AppAction::None
-                }
-            }
-            KeyCode::Char('r') => {
-                self.performance.refresh_rate = self.performance.refresh_rate.next();
-                AppAction::None
-            }
-            KeyCode::Up | KeyCode::Char('k') => {
-                self.performance.scroll_offset = self.performance.scroll_offset.saturating_sub(1);
-                AppAction::None
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                self.performance.scroll_offset += 1;
-                AppAction::None
             }
             _ => AppAction::None,
         }
@@ -1908,9 +2191,6 @@ impl App {
                 self.logcat.is_streaming = false;
                 self.logcat.stream_rx = None;
             }
-            Page::Performance => {
-                self.performance.is_monitoring = false;
-            }
             // Bugreport continues in background
             _ => {}
         }
@@ -2088,12 +2368,12 @@ impl App {
 
     /// Check if performance data collection is due.
     pub fn perf_needs_collect(&self) -> bool {
-        if self.page != Page::Performance || !self.performance.is_monitoring || !self.device_manager.is_connected() {
+        if self.page != Page::Dashboard || !self.device_manager.is_connected() {
             return false;
         }
         match self.performance.last_collect {
             None => true,
-            Some(last) => last.elapsed().as_secs() >= self.performance.refresh_rate.secs(),
+            Some(last) => last.elapsed().as_secs() >= PERF_REFRESH_SECS,
         }
     }
 
@@ -2104,7 +2384,7 @@ impl App {
         }
 
         let (top_raw, mem_raw, bat_raw) = tokio::join!(
-            self.device_manager.client.shell("top -n 1 -b -m 10"),
+            self.device_manager.client.shell("top -n 1 -b"),
             self.device_manager.client.shell("cat /proc/meminfo"),
             self.device_manager.client.shell("dumpsys battery"),
         );
@@ -2228,23 +2508,6 @@ impl App {
                 }
                 self.shell.is_running = false;
             }
-            AppAction::ShellExecuteStream(cmd) => {
-                let (tx, rx) = mpsc::unbounded_channel();
-                match self.device_manager.client.shell_stream(&cmd, tx).await {
-                    Ok(child) => {
-                        self.shell.stream_rx = Some(rx);
-                        self.shell.is_streaming = true;
-                        self.shell.is_running = true;
-                        self.stream_children.push(child);
-                    }
-                    Err(e) => {
-                        self.shell.output.push(ShellOutputEntry {
-                            entry_type: ShellEntryType::Error,
-                            content: e.to_string(),
-                        });
-                    }
-                }
-            }
             AppAction::ShellStop => {
                 self.shell.is_streaming = false;
                 self.shell.is_running = false;
@@ -2276,11 +2539,6 @@ impl App {
                 for child in self.stream_children.drain(..) {
                     drop(child);
                 }
-            }
-
-            // Performance
-            AppAction::PerfCollect => {
-                self.collect_perf_data().await;
             }
 
             // Files
@@ -2471,7 +2729,6 @@ impl App {
                     Ok(()) => {
                         self.screen.captures.push(ScreenCapture {
                             filename: format!("screenshot-{timestamp}.png"),
-                            local_path,
                             timestamp,
                         });
                     }
@@ -2511,7 +2768,6 @@ impl App {
                     let _ = self.device_manager.client.shell("rm /sdcard/adbwrench_recording.mp4").await;
                     self.screen.recordings.push(RecordingEntry {
                         filename: format!("recording-{timestamp}.mp4"),
-                        local_path,
                         duration_secs: self.screen.record_elapsed,
                         timestamp,
                     });
@@ -2533,6 +2789,12 @@ impl App {
         if let Some((_, _, time)) = &self.apps.action_result {
             if time.elapsed().as_secs() >= 3 {
                 self.apps.action_result = None;
+            }
+        }
+        // Dashboard copied feedback
+        if let Some((_, time)) = &self.dashboard.copied_feedback {
+            if time.elapsed().as_secs() >= 2 {
+                self.dashboard.copied_feedback = None;
             }
         }
     }

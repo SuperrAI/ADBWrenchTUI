@@ -16,12 +16,6 @@ impl AdbClient {
         Self { serial: None }
     }
 
-    pub fn with_serial(serial: impl Into<String>) -> Self {
-        Self {
-            serial: Some(serial.into()),
-        }
-    }
-
     pub fn set_serial(&mut self, serial: Option<String>) {
         self.serial = serial;
     }
@@ -102,10 +96,6 @@ impl AdbClient {
         self.exec(&["pull", remote, local]).await
     }
 
-    /// Push a file from the local filesystem to the device.
-    pub async fn push(&self, local: &str, remote: &str) -> Result<String> {
-        self.exec(&["push", local, remote]).await
-    }
 }
 
 impl Default for AdbClient {

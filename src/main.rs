@@ -61,8 +61,8 @@ async fn main() -> Result<()> {
                     app.dispatch_action(action).await;
                 }
             }
-            Event::Mouse(_mouse) => {
-                // TODO: mouse handling
+            Event::Mouse(mouse) => {
+                app.handle_mouse(mouse);
             }
             Event::Resize(_w, _h) => {
                 // Terminal auto-handles resize

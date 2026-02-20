@@ -8,7 +8,6 @@ impl Theme {
     // ── Core palette ───────────────────────────────────────────────
     pub const BG: Color = Color::Rgb(23, 23, 23); // #171717 (neutral-900)
     pub const BG_ELEVATED: Color = Color::Rgb(38, 38, 38); // #262626 (neutral-800)
-    pub const BG_MUTED: Color = Color::Rgb(30, 30, 30); // between 900 and 800
     pub const BORDER: Color = Color::Rgb(64, 64, 64); // #404040 (neutral-700)
     pub const FG: Color = Color::Rgb(245, 245, 245); // #f5f5f5 (neutral-100)
     pub const FG_DIM: Color = Color::Rgb(163, 163, 163); // #a3a3a3 (neutral-400)
@@ -16,7 +15,6 @@ impl Theme {
 
     // ── Accent ─────────────────────────────────────────────────────
     pub const ORANGE: Color = Color::Rgb(249, 115, 22); // #f97316 (orange-500)
-    pub const ORANGE_DIM: Color = Color::Rgb(194, 65, 12); // #c2410c (orange-700)
 
     // ── Semantic colors ────────────────────────────────────────────
     pub const GREEN: Color = Color::Rgb(34, 197, 94); // #22c55e (green-500)

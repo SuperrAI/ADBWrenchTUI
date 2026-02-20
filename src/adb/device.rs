@@ -195,13 +195,6 @@ impl DeviceManager {
         Ok(())
     }
 
-    /// Disconnect from the current device.
-    pub fn disconnect(&mut self) {
-        self.client.set_serial(None);
-        self.current_device = None;
-        self.state = ConnectionState::Disconnected;
-    }
-
     pub fn is_connected(&self) -> bool {
         self.state == ConnectionState::Connected
     }

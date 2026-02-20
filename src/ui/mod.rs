@@ -4,7 +4,6 @@ mod shell;
 mod logcat;
 mod files;
 mod apps;
-mod performance;
 mod controls;
 mod settings;
 mod bugreport;
@@ -49,7 +48,6 @@ pub fn render(app: &App, frame: &mut Frame) {
         Page::Apps => apps::render(app, frame, content_area),
         Page::Files => files::render(app, frame, content_area),
         Page::Controls => controls::render(app, frame, content_area),
-        Page::Performance => performance::render(app, frame, content_area),
         Page::Bugreport => bugreport::render(app, frame, content_area),
         Page::Settings => settings::render(app, frame, content_area),
     }

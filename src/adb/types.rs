@@ -7,7 +7,6 @@ pub enum ConnectionState {
     Disconnected,
     Connecting,
     Connected,
-    ConnectionLost,
 }
 
 /// Basic device identity.
@@ -73,8 +72,6 @@ pub struct BatteryInfo {
     pub status: String,
     pub health: String,
     pub temperature: String,
-    pub voltage: String,
-    pub technology: String,
 }
 
 /// Package information.
@@ -83,9 +80,6 @@ pub struct PackageInfo {
     pub package_name: String,
     pub is_system: bool,
     pub is_enabled: bool,
-    pub version_name: Option<String>,
-    pub version_code: Option<String>,
-    pub installed_path: Option<String>,
 }
 
 /// File entry from device filesystem.
@@ -96,19 +90,13 @@ pub struct FileEntry {
     pub is_directory: bool,
     pub size: u64,
     pub permissions: String,
-    pub owner: String,
-    pub group: String,
-    pub modified_date: String,
     pub is_symlink: bool,
-    pub link_target: Option<String>,
 }
 
 /// Logcat entry.
 #[derive(Debug, Clone)]
 pub struct LogEntry {
     pub timestamp: String,
-    pub pid: String,
-    pub tid: String,
     pub level: LogLevel,
     pub tag: String,
     pub message: String,
@@ -149,20 +137,6 @@ impl LogLevel {
     }
 }
 
-/// Performance snapshot.
-#[derive(Debug, Clone, Default)]
-pub struct PerfSnapshot {
-    pub cpu_percent: f64,
-    pub mem_total_kb: u64,
-    pub mem_used_kb: u64,
-    pub mem_percent: f64,
-    pub battery_level: u32,
-    pub battery_status: String,
-    pub temperature: f64,
-    pub voltage: f64,
-    pub processes: Vec<ProcessInfo>,
-}
-
 #[derive(Debug, Clone)]
 pub struct ProcessInfo {
     pub pid: String,
@@ -170,4 +144,7 @@ pub struct ProcessInfo {
     pub name: String,
     pub cpu_percent: f64,
     pub mem_percent: f64,
+    pub res: String,
+    pub state: String,
+    pub time: String,
 }

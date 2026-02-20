@@ -128,12 +128,6 @@ fn render_device_status(app: &App, frame: &mut Frame, area: Rect) {
                 Span::styled("Connecting...", Theme::dim()),
             ])]
         }
-        ConnectionState::ConnectionLost => {
-            vec![Line::from(vec![
-                Span::styled(" ✕ ", Theme::error()),
-                Span::styled("Connection lost", Theme::error()),
-            ])]
-        }
         ConnectionState::Disconnected => {
             vec![Line::from(vec![
                 Span::styled(" ○ ", Theme::muted()),
