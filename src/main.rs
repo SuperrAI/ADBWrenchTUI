@@ -49,9 +49,9 @@ async fn main() -> Result<()> {
         // Handle events
         match events.next().await? {
             Event::Key(key) => {
-                // Let the app handle global keys first
+                // Let the app handle global keys first, then page-specific
                 if !app.handle_key(key) {
-                    // TODO: forward to active page handler
+                    app.handle_page_key(key);
                 }
             }
             Event::Mouse(_mouse) => {
@@ -61,7 +61,10 @@ async fn main() -> Result<()> {
                 // Terminal auto-handles resize
             }
             Event::Tick => {
-                // TODO: periodic data refresh
+                // Dashboard auto-refresh
+                if app.dashboard_needs_refresh() {
+                    app.refresh_dashboard().await;
+                }
             }
         }
     }
