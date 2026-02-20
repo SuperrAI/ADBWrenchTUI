@@ -853,13 +853,23 @@ impl App {
             return true;
         }
 
-        // Tab toggles focus between sidebar and content
+        // Tab navigation
         if key.code == KeyCode::Tab && !self.is_text_input_active() {
-            self.focus = match self.focus {
-                Focus::Sidebar => Focus::Content,
-                Focus::Content => Focus::Sidebar,
-            };
-            return true;
+            if self.focus == Focus::Sidebar {
+                self.focus = Focus::Content;
+                return true;
+            }
+            // Pages with internal sections handle Tab themselves (fall through).
+            // Other pages: Tab returns to sidebar.
+            match self.page {
+                Page::Controls | Page::Apps | Page::Settings => {
+                    // Fall through to page handler for internal Tab cycling
+                }
+                _ => {
+                    self.focus = Focus::Sidebar;
+                    return true;
+                }
+            }
         }
 
         // Number shortcuts for page navigation (sidebar only)
