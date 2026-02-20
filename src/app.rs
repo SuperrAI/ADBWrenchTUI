@@ -853,14 +853,14 @@ impl App {
             return true;
         }
 
-        // Tab navigation
-        if key.code == KeyCode::Tab && !self.is_text_input_active() {
+        // Tab / Shift+Tab navigation
+        if (key.code == KeyCode::Tab || key.code == KeyCode::BackTab) && !self.is_text_input_active() {
             if self.focus == Focus::Sidebar {
                 self.focus = Focus::Content;
                 return true;
             }
-            // Pages with internal sections handle Tab themselves (fall through).
-            // Other pages: Tab returns to sidebar.
+            // Pages with internal sections handle Tab/BackTab themselves (fall through).
+            // Other pages: Tab/BackTab returns to sidebar.
             match self.page {
                 Page::Controls | Page::Apps | Page::Settings => {
                     // Fall through to page handler for internal Tab cycling
@@ -956,7 +956,7 @@ impl App {
                 action,
                 ..
             } => match key.code {
-                KeyCode::Left | KeyCode::Right | KeyCode::Tab => {
+                KeyCode::Left | KeyCode::Right | KeyCode::Tab | KeyCode::BackTab => {
                     *confirm_focused = !*confirm_focused;
                     true
                 }
@@ -1305,6 +1305,11 @@ impl App {
                 self.controls.focus_item = 0;
                 AppAction::None
             }
+            KeyCode::BackTab => {
+                self.controls.focus_section = if self.controls.focus_section == 0 { 5 } else { self.controls.focus_section - 1 };
+                self.controls.focus_item = 0;
+                AppAction::None
+            }
             KeyCode::Up | KeyCode::Char('k') => {
                 self.controls.focus_item = self.controls.focus_item.saturating_sub(1);
                 AppAction::None
@@ -1579,7 +1584,7 @@ impl App {
             KeyCode::Char('/') => { self.apps.search_active = true; AppAction::None }
             KeyCode::Char('f') => { self.apps.filter_type = self.apps.filter_type.next(); AppAction::None }
             KeyCode::Char('r') => AppAction::AppsRefresh,
-            KeyCode::Tab => {
+            KeyCode::Tab | KeyCode::BackTab => {
                 self.apps.focus_panel = match self.apps.focus_panel {
                     AppPanel::List => AppPanel::Detail,
                     AppPanel::Detail => AppPanel::List,
@@ -1691,7 +1696,7 @@ impl App {
             }
             KeyCode::Char('/') => { self.settings.search_active = true; AppAction::None }
             KeyCode::Char('r') => AppAction::SettingsLoad,
-            KeyCode::Tab => {
+            KeyCode::Tab | KeyCode::BackTab => {
                 self.settings.focus_area = match self.settings.focus_area {
                     SettingsFocus::QuickToggles => SettingsFocus::List,
                     SettingsFocus::List => SettingsFocus::QuickToggles,
