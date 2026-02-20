@@ -13,7 +13,8 @@ mod screen;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 
-use crate::app::{App, Page};
+use crate::app::{App, ModalState, Page};
+use crate::components::{render_confirm_modal, render_input_modal};
 use crate::theme::Theme;
 
 /// Sidebar width in columns.
@@ -51,6 +52,17 @@ pub fn render(app: &App, frame: &mut Frame) {
         Page::Performance => performance::render(app, frame, content_area),
         Page::Bugreport => bugreport::render(app, frame, content_area),
         Page::Settings => settings::render(app, frame, content_area),
+    }
+
+    // Render modal overlay if active
+    match &app.modal {
+        ModalState::None => {}
+        ModalState::Confirm { title, message, confirm_focused, .. } => {
+            render_confirm_modal(frame, area, title, message, *confirm_focused);
+        }
+        ModalState::TextInput { title, prompt, value, cursor_pos, .. } => {
+            render_input_modal(frame, area, title, prompt, value, *cursor_pos);
+        }
     }
 }
 

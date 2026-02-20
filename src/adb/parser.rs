@@ -1,3 +1,4 @@
+use crate::app::{PackageDetails, SettingEntry};
 use super::types::*;
 
 /// Parse `/proc/meminfo` output to extract memory values.
@@ -169,6 +170,183 @@ pub fn parse_logcat_line(line: &str) -> Option<LogEntry> {
         tag: String::new(),
         message: line.to_string(),
     })
+}
+
+/// Parse `ls -la` output into FileEntry entries.
+pub fn parse_ls_output(output: &str, parent_path: &str) -> Vec<FileEntry> {
+    let mut entries = Vec::new();
+    let parent = if parent_path.ends_with('/') {
+        parent_path.to_string()
+    } else {
+        format!("{parent_path}/")
+    };
+
+    for line in output.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with("total") {
+            continue;
+        }
+
+        let parts: Vec<&str> = line.splitn(8, char::is_whitespace).collect();
+        if parts.len() < 8 {
+            continue;
+        }
+
+        let permissions = parts[0].to_string();
+        if permissions.len() < 2 {
+            continue;
+        }
+
+        let is_directory = permissions.starts_with('d');
+        let is_symlink = permissions.starts_with('l');
+        let owner = parts[2].to_string();
+        let group = parts[3].to_string();
+        let size: u64 = parts[4].parse().unwrap_or(0);
+
+        // Date is parts[5] + parts[6], name is parts[7]
+        let modified_date = format!("{} {}", parts[5], parts[6]);
+        let name_part = parts[7].trim();
+
+        // Handle symlinks: "name -> target"
+        let (name, link_target) = if is_symlink {
+            if let Some(arrow) = name_part.find(" -> ") {
+                (name_part[..arrow].to_string(), Some(name_part[arrow + 4..].to_string()))
+            } else {
+                (name_part.to_string(), None)
+            }
+        } else {
+            (name_part.to_string(), None)
+        };
+
+        // Skip . and ..
+        if name == "." || name == ".." {
+            continue;
+        }
+
+        entries.push(FileEntry {
+            path: format!("{parent}{name}"),
+            name,
+            is_directory,
+            size,
+            permissions,
+            owner,
+            group,
+            modified_date,
+            is_symlink,
+            link_target,
+        });
+    }
+
+    // Sort: directories first, then by name
+    entries.sort_by(|a, b| {
+        b.is_directory.cmp(&a.is_directory).then(a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
+
+    entries
+}
+
+/// Parse `pm list packages -f` output into PackageInfo entries.
+pub fn parse_package_list(output: &str) -> Vec<PackageInfo> {
+    let mut packages = Vec::new();
+
+    for line in output.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("package:") {
+            // Format: package:/path/to/apk=com.package.name
+            if let Some(eq_pos) = rest.rfind('=') {
+                let path = rest[..eq_pos].to_string();
+                let package_name = rest[eq_pos + 1..].to_string();
+                let is_system = path.starts_with("/system") || path.starts_with("/product") || path.starts_with("/vendor");
+
+                packages.push(PackageInfo {
+                    package_name,
+                    is_system,
+                    is_enabled: true,
+                    version_name: None,
+                    version_code: None,
+                    installed_path: Some(path),
+                });
+            }
+        }
+    }
+
+    packages.sort_by(|a, b| a.package_name.cmp(&b.package_name));
+    packages
+}
+
+/// Parse `dumpsys package <name>` output into PackageDetails.
+pub fn parse_package_details(output: &str, package_name: &str) -> PackageDetails {
+    let get_field = |prefix: &str| -> String {
+        for line in output.lines() {
+            let trimmed = line.trim();
+            if let Some(rest) = trimmed.strip_prefix(prefix) {
+                return rest.trim_start_matches('=').trim().to_string();
+            }
+        }
+        String::new()
+    };
+
+    let version_name = get_field("versionName=");
+    let version_code = get_field("versionCode=")
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .to_string();
+    let installed_path = get_field("codePath=");
+    let first_install = get_field("firstInstallTime=");
+    let last_update = get_field("lastUpdateTime=");
+
+    // Parse permissions
+    let mut permissions = Vec::new();
+    let mut in_permissions = false;
+    for line in output.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("requested permissions:") || trimmed.starts_with("install permissions:") {
+            in_permissions = true;
+            continue;
+        }
+        if in_permissions {
+            if trimmed.is_empty() || (!trimmed.starts_with("android.permission.") && !trimmed.starts_with("com.")) {
+                if !trimmed.starts_with("android.permission.") && !trimmed.starts_with("com.") {
+                    in_permissions = false;
+                    continue;
+                }
+            }
+            let perm = trimmed.split(':').next().unwrap_or(trimmed).trim().to_string();
+            if !permissions.contains(&perm) {
+                permissions.push(perm);
+            }
+        }
+    }
+
+    let is_system = installed_path.starts_with("/system") || installed_path.starts_with("/product");
+
+    PackageDetails {
+        package_name: package_name.to_string(),
+        version_name,
+        version_code,
+        installed_path,
+        first_install_time: first_install,
+        last_update_time: last_update,
+        is_system,
+        is_enabled: true,
+        permissions,
+    }
+}
+
+/// Parse `settings list <namespace>` output.
+pub fn parse_settings_list(output: &str) -> Vec<SettingEntry> {
+    let mut entries = Vec::new();
+    for line in output.lines() {
+        let line = line.trim();
+        if let Some(eq_pos) = line.find('=') {
+            let key = line[..eq_pos].to_string();
+            let value = line[eq_pos + 1..].to_string();
+            entries.push(SettingEntry { key, value });
+        }
+    }
+    entries.sort_by(|a, b| a.key.cmp(&b.key));
+    entries
 }
 
 /// Parse `top -n 1 -b` output for CPU usage and process list.

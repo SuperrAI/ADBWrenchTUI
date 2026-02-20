@@ -1,10 +1,11 @@
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, BorderType, Gauge, Paragraph};
+use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
 use crate::app::App;
+use crate::components::{card_block, kv_line, render_gauge, render_keybinding_footer, truncate_str};
 use crate::theme::Theme;
 
 pub fn render(app: &App, frame: &mut Frame, area: Rect) {
@@ -115,20 +116,12 @@ fn render_header(app: &App, frame: &mut Frame, area: Rect) {
 // ── Footer ────────────────────────────────────────────────────────
 
 fn render_footer(frame: &mut Frame, area: Rect) {
-    let line = Line::from(vec![
-        Span::styled(" r", Theme::accent()),
-        Span::styled(" refresh  ", Theme::muted()),
-        Span::styled("a", Theme::accent()),
-        Span::styled(" auto-refresh  ", Theme::muted()),
-        Span::styled("Tab", Theme::accent()),
-        Span::styled(" focus  ", Theme::muted()),
-        Span::styled("Esc", Theme::accent()),
-        Span::styled(" sidebar", Theme::muted()),
+    render_keybinding_footer(frame, area, &[
+        ("r", "refresh"),
+        ("a", "auto-refresh"),
+        ("Tab", "focus"),
+        ("Esc", "sidebar"),
     ]);
-    frame.render_widget(
-        Paragraph::new(line).style(Style::default().bg(Theme::BG)),
-        area,
-    );
 }
 
 // ── Loading state ─────────────────────────────────────────────────
@@ -150,36 +143,7 @@ fn render_loading(frame: &mut Frame, area: Rect) {
     );
 }
 
-// ── Card helpers ──────────────────────────────────────────────────
-
-fn card_block(title: &str) -> Block<'_> {
-    Block::default()
-        .borders(Borders::ALL)
-        .border_style(Theme::border())
-        .border_type(BorderType::Rounded)
-        .title(Span::styled(
-            format!(" {title} "),
-            Theme::title(),
-        ))
-        .style(Style::default().bg(Theme::BG))
-}
-
-fn kv_line<'a>(key: &'a str, value: &'a str) -> Line<'a> {
-    Line::from(vec![
-        Span::styled(format!(" {key}: "), Theme::muted()),
-        Span::styled(value, Theme::text()),
-    ])
-}
-
-/// Render a horizontal progress bar in a single line area.
-fn render_gauge(frame: &mut Frame, area: Rect, ratio: f64, label: &str, color: ratatui::style::Color) {
-    let clamped = ratio.clamp(0.0, 1.0);
-    let gauge = Gauge::default()
-        .ratio(clamped)
-        .label(Span::styled(label, Style::default().fg(Theme::FG).add_modifier(Modifier::BOLD)))
-        .gauge_style(Style::default().fg(color).bg(Theme::BG_ELEVATED));
-    frame.render_widget(gauge, area);
-}
+// ── Card helpers (see crate::components for shared versions) ─────
 
 // ── Cards ─────────────────────────────────────────────────────────
 
@@ -340,11 +304,3 @@ fn render_software_card(app: &App, frame: &mut Frame, area: Rect) {
     }
 }
 
-/// Truncate a string with ellipsis if it exceeds max length.
-fn truncate_str(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        s.to_string()
-    } else {
-        format!("{}…", &s[..max - 1])
-    }
-}

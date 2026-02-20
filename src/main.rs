@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 
-use app::App;
+use app::{App, AppAction};
 use event::{Event, EventHandler};
 
 #[tokio::main]
@@ -51,7 +51,14 @@ async fn main() -> Result<()> {
             Event::Key(key) => {
                 // Let the app handle global keys first, then page-specific
                 if !app.handle_key(key) {
-                    app.handle_page_key(key);
+                    let action = app.handle_page_key(key);
+                    if !matches!(action, AppAction::None) {
+                        app.dispatch_action(action).await;
+                    }
+                }
+                // Check for pending action from modal confirmation
+                if let Some(action) = app.pending_action.take() {
+                    app.dispatch_action(action).await;
                 }
             }
             Event::Mouse(_mouse) => {
@@ -65,6 +72,22 @@ async fn main() -> Result<()> {
                 if app.dashboard_needs_refresh() {
                     app.refresh_dashboard().await;
                 }
+
+                // Performance polling
+                if app.perf_needs_collect() {
+                    app.collect_perf_data().await;
+                }
+
+                // Drain streaming channels
+                app.drain_shell_output();
+                app.drain_logcat_lines();
+                app.drain_bugreport_progress();
+
+                // Update recording elapsed
+                app.update_screen_recording();
+
+                // Clear stale result messages
+                app.clear_stale_results();
             }
         }
     }

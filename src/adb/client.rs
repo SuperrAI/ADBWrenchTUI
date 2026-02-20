@@ -96,6 +96,16 @@ impl AdbClient {
         let output = self.shell(&format!("getprop {prop}")).await?;
         Ok(output.trim().to_string())
     }
+
+    /// Pull a file from the device to the local filesystem.
+    pub async fn pull(&self, remote: &str, local: &str) -> Result<String> {
+        self.exec(&["pull", remote, local]).await
+    }
+
+    /// Push a file from the local filesystem to the device.
+    pub async fn push(&self, local: &str, remote: &str) -> Result<String> {
+        self.exec(&["push", local, remote]).await
+    }
 }
 
 impl Default for AdbClient {
