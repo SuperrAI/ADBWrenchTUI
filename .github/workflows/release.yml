@@ -1,0 +1,97 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            label: macos-arm64
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            label: macos-x86_64
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            label: linux-x86_64
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            label: linux-arm64
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            label: windows-x86_64
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        run: |
+          rustup update stable
+          rustup target add ${{ matrix.target }}
+
+      - name: Install cross-compilation tools (Linux ARM64)
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          echo '[target.aarch64-unknown-linux-gnu]' >> ~/.cargo/config.toml
+          echo 'linker = "aarch64-linux-gnu-gcc"' >> ~/.cargo/config.toml
+
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Prepare binary (unix)
+        if: runner.os != 'Windows'
+        run: |
+          cp target/${{ matrix.target }}/release/adbwrenchtui adbwrenchtui-${{ matrix.label }}
+          sha256sum adbwrenchtui-${{ matrix.label }} > adbwrenchtui-${{ matrix.label }}.sha256
+
+      - name: Prepare binary (windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          cp target/${{ matrix.target }}/release/adbwrenchtui.exe adbwrenchtui-${{ matrix.label }}.exe
+          sha256sum adbwrenchtui-${{ matrix.label }}.exe > adbwrenchtui-${{ matrix.label }}.exe.sha256
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: binary-${{ matrix.label }}
+          path: |
+            adbwrenchtui-${{ matrix.label }}*
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Generate checksums file
+        run: |
+          cd artifacts
+          cat *.sha256 | sort > ../checksums-sha256.txt
+          cd ..
+          cp checksums-sha256.txt artifacts/
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            artifacts/adbwrenchtui-*
+            artifacts/checksums-sha256.txt

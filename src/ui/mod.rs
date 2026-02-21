@@ -8,6 +8,7 @@ mod controls;
 mod settings;
 mod bugreport;
 mod screen;
+mod about;
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -50,6 +51,7 @@ pub fn render(app: &App, frame: &mut Frame) {
         Page::Controls => controls::render(app, frame, content_area),
         Page::Bugreport => bugreport::render(app, frame, content_area),
         Page::Settings => settings::render(app, frame, content_area),
+        Page::About => about::render(app, frame, content_area),
     }
 
     // Render modal overlay if active

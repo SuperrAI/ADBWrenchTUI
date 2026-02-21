@@ -1,6 +1,7 @@
 mod adb;
 mod app;
 mod components;
+mod config;
 mod event;
 mod theme;
 mod tui;
@@ -25,11 +26,16 @@ async fn main() -> Result<()> {
 
     tracing::info!("ADBWrenchTUI starting");
 
+    // Detect terminal image protocol BEFORE entering alternate screen
+    let picker = ratatui_image::picker::Picker::from_query_stdio()
+        .unwrap_or_else(|_| ratatui_image::picker::Picker::halfblocks());
+    tracing::info!("Image protocol: {:?}", picker.protocol_type());
+
     // Initialize terminal
     let mut terminal = tui::init()?;
 
     // Create app state
-    let mut app = App::new();
+    let mut app = App::new(Some(picker));
 
     // Try to detect connected devices
     if let Err(e) = app.init_device().await {
@@ -88,6 +94,11 @@ async fn main() -> Result<()> {
 
                 // Clear stale result messages
                 app.clear_stale_results();
+
+                // Dispatch any pending actions (e.g. auto-stop recording)
+                if let Some(action) = app.pending_action.take() {
+                    app.dispatch_action(action).await;
+                }
             }
         }
     }

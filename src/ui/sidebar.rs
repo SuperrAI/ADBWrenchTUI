@@ -142,7 +142,7 @@ fn render_device_status(app: &App, frame: &mut Frame, area: Rect) {
 
 fn render_footer(frame: &mut Frame, area: Rect) {
     let footer = Paragraph::new(Line::from(vec![
-        Span::styled(" v0.1.0 ", Theme::muted()),
+        Span::styled(format!(" v{} ", env!("CARGO_PKG_VERSION")), Theme::muted()),
     ]))
     .style(Style::default().bg(Theme::BG));
 

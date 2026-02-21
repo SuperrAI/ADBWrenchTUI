@@ -1,12 +1,16 @@
+use std::cell::RefCell;
 use std::collections::HashSet;
 use std::time::Instant;
 
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui_image::picker::Picker;
+use ratatui_image::protocol::StatefulProtocol;
 use tokio::sync::mpsc;
 
 use crate::adb::types::*;
 use crate::adb::DeviceManager;
+use crate::config::AppConfig;
 use crate::adb::parser;
 
 // ── Enums for page-specific options ──────────────────────────────
@@ -546,6 +550,18 @@ pub struct ScreenState {
     pub recording_selected: usize,
     pub stream_rx: Option<mpsc::UnboundedReceiver<String>>,
     pub error: Option<String>,
+    /// Image protocol picker for terminal image rendering.
+    pub picker: Option<Picker>,
+    /// Current preview image state (needs interior mutability for StatefulImage rendering).
+    pub preview_state: RefCell<Option<StatefulProtocol>>,
+    /// Filename of the currently loaded preview (to avoid redundant reloads).
+    pub preview_filename: Option<String>,
+    /// Whether the output path input is being edited.
+    pub path_input_active: bool,
+    /// Current path input buffer.
+    pub path_input: String,
+    /// Transient status message shown in header (e.g. "SAVING RECORDING...").
+    pub status: Option<String>,
 }
 
 // ── Modal state ──────────────────────────────────────────────────
@@ -625,6 +641,7 @@ pub enum Page {
     Controls,
     Bugreport,
     Settings,
+    About,
 }
 
 impl Page {
@@ -638,6 +655,7 @@ impl Page {
         Page::Controls,
         Page::Bugreport,
         Page::Settings,
+        Page::About,
     ];
 
     pub fn label(&self) -> &str {
@@ -651,6 +669,7 @@ impl Page {
             Self::Controls => "Controls",
             Self::Bugreport => "Bugreport",
             Self::Settings => "Settings",
+            Self::About => "About",
         }
     }
 
@@ -660,6 +679,7 @@ impl Page {
             Self::Dashboard => "MAIN",
             Self::Shell | Self::Logcat | Self::Screen | Self::Apps | Self::Files => "TOOLS",
             Self::Controls | Self::Bugreport | Self::Settings => "SYSTEM",
+            Self::About => "INFO",
         }
     }
 
@@ -675,6 +695,7 @@ impl Page {
             Self::Controls => '7',
             Self::Bugreport => '8',
             Self::Settings => '9',
+            Self::About => '0',
         }
     }
 }
@@ -696,6 +717,7 @@ pub struct App {
     pub focus: Focus,
     pub device_manager: DeviceManager,
     pub modal: ModalState,
+    pub config: AppConfig,
     // Page states
     pub dashboard: DashboardState,
     pub shell: ShellState,
@@ -714,11 +736,13 @@ pub struct App {
 }
 
 impl App {
-    pub fn new() -> Self {
+    pub fn new(picker: Option<Picker>) -> Self {
+        let config = AppConfig::load();
         Self {
             running: true,
             page: Page::Dashboard,
             sidebar_index: 0,
+            config,
             focus: Focus::Sidebar,
             device_manager: DeviceManager::new(),
             modal: ModalState::None,
@@ -838,6 +862,12 @@ impl App {
                 recording_selected: 0,
                 stream_rx: None,
                 error: None,
+                picker,
+                preview_state: RefCell::new(None),
+                preview_filename: None,
+                path_input_active: false,
+                path_input: String::new(),
+                status: None,
             },
             stream_children: Vec::new(),
             pending_action: None,
@@ -967,6 +997,7 @@ impl App {
             Page::Controls => self.controls.text_input_active,
             Page::Apps => self.apps.search_active,
             Page::Settings => self.settings.search_active,
+            Page::Screen => self.screen.path_input_active,
             _ => false,
         }
     }
@@ -1179,6 +1210,7 @@ impl App {
             Page::Settings => self.handle_settings_key(key),
             Page::Bugreport => self.handle_bugreport_key(key),
             Page::Screen => self.handle_screen_key(key),
+            Page::About => AppAction::None,
         }
     }
 
@@ -2118,7 +2150,16 @@ impl App {
     }
 
     fn handle_screen_key(&mut self, key: KeyEvent) -> AppAction {
+        // Path input mode — capture all keys
+        if self.screen.path_input_active {
+            return self.handle_screen_path_input(key);
+        }
         match key.code {
+            KeyCode::Char('p') => {
+                self.screen.path_input_active = true;
+                self.screen.path_input = self.config.output_dir.clone();
+                AppAction::None
+            }
             KeyCode::Char('1') => { self.screen.active_tab = ScreenTab::Screenshot; AppAction::None }
             KeyCode::Char('2') => { self.screen.active_tab = ScreenTab::Record; AppAction::None }
             KeyCode::Char('c') | KeyCode::Enter => {
@@ -2140,8 +2181,19 @@ impl App {
                 }
             }
             KeyCode::Char('d') => {
-                if self.screen.active_tab == ScreenTab::Record {
-                    self.screen.record_duration = self.screen.record_duration.next();
+                match self.screen.active_tab {
+                    ScreenTab::Screenshot => {
+                        self.delete_selected_screenshot();
+                    }
+                    ScreenTab::Record => {
+                        self.screen.record_duration = self.screen.record_duration.next();
+                    }
+                }
+                AppAction::None
+            }
+            KeyCode::Char('o') => {
+                if self.screen.active_tab == ScreenTab::Screenshot {
+                    self.open_selected_screenshot();
                 }
                 AppAction::None
             }
@@ -2149,6 +2201,7 @@ impl App {
                 match self.screen.active_tab {
                     ScreenTab::Screenshot => {
                         self.screen.capture_selected = self.screen.capture_selected.saturating_sub(1);
+                        self.load_screenshot_preview();
                     }
                     ScreenTab::Record => {
                         self.screen.recording_selected = self.screen.recording_selected.saturating_sub(1);
@@ -2161,6 +2214,7 @@ impl App {
                     ScreenTab::Screenshot => {
                         if !self.screen.captures.is_empty() {
                             self.screen.capture_selected = (self.screen.capture_selected + 1).min(self.screen.captures.len() - 1);
+                            self.load_screenshot_preview();
                         }
                     }
                     ScreenTab::Record => {
@@ -2172,6 +2226,124 @@ impl App {
                 AppAction::None
             }
             _ => AppAction::None,
+        }
+    }
+
+    /// Handle key input while editing the output directory path.
+    fn handle_screen_path_input(&mut self, key: KeyEvent) -> AppAction {
+        match key.code {
+            KeyCode::Enter => {
+                let path = self.screen.path_input.trim().to_string();
+                if path.is_empty() {
+                    self.screen.path_input_active = false;
+                    return AppAction::None;
+                }
+                let expanded = if let Some(rest) = path.strip_prefix('~') {
+                    if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
+                        home.to_string_lossy().to_string() + rest
+                    } else {
+                        path.clone()
+                    }
+                } else {
+                    path.clone()
+                };
+                let p = std::path::Path::new(&expanded);
+                if p.is_dir() {
+                    self.config.output_dir = expanded;
+                    self.config.save();
+                    self.screen.error = None;
+                } else {
+                    self.screen.error = Some(format!("Not a directory: {path}"));
+                }
+                self.screen.path_input_active = false;
+                AppAction::None
+            }
+            KeyCode::Esc => {
+                self.screen.path_input_active = false;
+                AppAction::None
+            }
+            KeyCode::Backspace => {
+                self.screen.path_input.pop();
+                AppAction::None
+            }
+            KeyCode::Char(c) => {
+                self.screen.path_input.push(c);
+                AppAction::None
+            }
+            _ => AppAction::None,
+        }
+    }
+
+    /// Load the selected screenshot into the preview state.
+    pub fn load_screenshot_preview(&mut self) {
+        let Some(cap) = self.screen.captures.get(self.screen.capture_selected) else {
+            *self.screen.preview_state.borrow_mut() = None;
+            self.screen.preview_filename = None;
+            return;
+        };
+
+        // Skip if already loaded
+        if self.screen.preview_filename.as_deref() == Some(&cap.filename) {
+            return;
+        }
+
+        let filename = cap.filename.clone();
+        let path = self.config.output_path(&filename);
+
+        let Some(ref mut picker) = self.screen.picker else {
+            return;
+        };
+
+        match image::open(&path) {
+            Ok(img) => {
+                let protocol = picker.new_resize_protocol(img);
+                *self.screen.preview_state.borrow_mut() = Some(protocol);
+                self.screen.preview_filename = Some(filename);
+            }
+            Err(e) => {
+                tracing::warn!("Failed to load screenshot {path}: {e}");
+                *self.screen.preview_state.borrow_mut() = None;
+                self.screen.preview_filename = None;
+            }
+        }
+    }
+
+    /// Delete the currently selected screenshot file and remove from list.
+    fn delete_selected_screenshot(&mut self) {
+        if self.screen.captures.is_empty() {
+            return;
+        }
+        let idx = self.screen.capture_selected;
+        let cap = &self.screen.captures[idx];
+
+        // Delete the file from disk
+        let path = self.config.output_path(&cap.filename);
+        if let Err(e) = std::fs::remove_file(&path) {
+            tracing::warn!("Failed to delete screenshot {path}: {e}");
+        }
+
+        self.screen.captures.remove(idx);
+        if self.screen.captures.is_empty() {
+            self.screen.capture_selected = 0;
+        } else {
+            self.screen.capture_selected = idx.min(self.screen.captures.len() - 1);
+        }
+
+        // Clear preview and reload
+        *self.screen.preview_state.borrow_mut() = None;
+        self.screen.preview_filename = None;
+        self.load_screenshot_preview();
+    }
+
+    /// Open the selected screenshot in the system default viewer.
+    fn open_selected_screenshot(&self) {
+        let Some(cap) = self.screen.captures.get(self.screen.capture_selected) else {
+            return;
+        };
+        let path = self.config.output_path(&cap.filename);
+        let cmd = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
+        if let Err(e) = std::process::Command::new(cmd).arg(&path).spawn() {
+            tracing::warn!("Failed to open screenshot: {e}");
         }
     }
 
@@ -2313,8 +2485,8 @@ impl App {
             if let Some(start) = self.screen.record_start {
                 self.screen.record_elapsed = start.elapsed().as_secs() as u32;
                 if self.screen.record_elapsed >= self.screen.record_duration.secs() {
-                    self.screen.is_recording = false;
-                    self.screen.stream_rx = None;
+                    // Queue the stop action so the recording gets pulled and saved
+                    self.pending_action = Some(AppAction::ScreenRecordStop);
                 }
             }
         }
@@ -2560,7 +2732,7 @@ impl App {
             AppAction::FilesPull(paths) => {
                 for path in &paths {
                     let filename = path.rsplit('/').next().unwrap_or("file");
-                    let local = format!("./{filename}");
+                    let local = self.config.output_path(filename);
                     match self.device_manager.client.pull(path, &local).await {
                         Ok(_) => {
                             self.controls.result = Some((true, format!("Pulled {filename}")));
@@ -2698,7 +2870,7 @@ impl App {
             AppAction::BugreportDownload(idx) => {
                 if let Some(entry) = self.bugreport.history.get_mut(idx) {
                     if let Some(ref device_path) = entry.device_path {
-                        let local = format!("./{}.zip", entry.filename);
+                        let local = self.config.output_path(&format!("{}.zip", entry.filename));
                         match self.device_manager.client.pull(device_path, &local).await {
                             Ok(_) => {
                                 entry.local_path = Some(local);
@@ -2714,9 +2886,11 @@ impl App {
             // Screen
             AppAction::ScreenCapture => {
                 self.screen.is_capturing = true;
+                self.screen.status = Some("CAPTURING SCREENSHOT...".into());
+                self.screen.error = None;
                 let timestamp = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
                 let device_path = "/sdcard/adbwrench_screenshot.png";
-                let local_path = format!("./screenshot-{timestamp}.png");
+                let local_path = self.config.output_path(&format!("screenshot-{timestamp}.png"));
 
                 let result = async {
                     self.device_manager.client.shell(&format!("screencap -p {device_path}")).await?;
@@ -2727,18 +2901,23 @@ impl App {
 
                 match result {
                     Ok(()) => {
-                        self.screen.captures.push(ScreenCapture {
+                        self.screen.captures.insert(0, ScreenCapture {
                             filename: format!("screenshot-{timestamp}.png"),
                             timestamp,
                         });
+                        self.screen.capture_selected = 0;
+                        self.load_screenshot_preview();
                     }
                     Err(e) => {
                         self.screen.error = Some(e.to_string());
                     }
                 }
                 self.screen.is_capturing = false;
+                self.screen.status = None;
             }
             AppAction::ScreenRecordStart => {
+                self.screen.status = Some("STARTING RECORDING...".into());
+                self.screen.error = None;
                 let duration = self.screen.record_duration.secs();
                 let cmd = format!("screenrecord --time-limit {duration} /sdcard/adbwrench_recording.mp4");
                 let (tx, rx) = mpsc::unbounded_channel();
@@ -2754,24 +2933,40 @@ impl App {
                         self.screen.error = Some(e.to_string());
                     }
                 }
+                self.screen.status = None;
             }
             AppAction::ScreenRecordStop => {
                 self.screen.is_recording = false;
                 self.screen.stream_rx = None;
-                for child in self.stream_children.drain(..) {
-                    drop(child);
+                self.screen.status = Some("SAVING RECORDING...".into());
+                self.screen.error = None;
+
+                // Kill the adb process to stop screenrecord on the device
+                for mut child in self.stream_children.drain(..) {
+                    let _ = child.kill().await;
                 }
+
+                // Give screenrecord time to finalize the mp4 container
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
                 // Pull the recording
                 let timestamp = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
-                let local_path = format!("./recording-{timestamp}.mp4");
-                if let Ok(_) = self.device_manager.client.pull("/sdcard/adbwrench_recording.mp4", &local_path).await {
-                    let _ = self.device_manager.client.shell("rm /sdcard/adbwrench_recording.mp4").await;
-                    self.screen.recordings.push(RecordingEntry {
-                        filename: format!("recording-{timestamp}.mp4"),
-                        duration_secs: self.screen.record_elapsed,
-                        timestamp,
-                    });
+                let local_path = self.config.output_path(&format!("recording-{timestamp}.mp4"));
+                match self.device_manager.client.pull("/sdcard/adbwrench_recording.mp4", &local_path).await {
+                    Ok(_) => {
+                        let _ = self.device_manager.client.shell("rm /sdcard/adbwrench_recording.mp4").await;
+                        self.screen.recordings.push(RecordingEntry {
+                            filename: format!("recording-{timestamp}.mp4"),
+                            duration_secs: self.screen.record_elapsed,
+                            timestamp,
+                        });
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to pull recording: {e}");
+                        self.screen.error = Some(format!("Failed to save recording: {e}"));
+                    }
                 }
+                self.screen.status = None;
             }
         }
     }
@@ -2802,6 +2997,6 @@ impl App {
 
 impl Default for App {
     fn default() -> Self {
-        Self::new()
+        Self::new(None)
     }
 }
