@@ -385,6 +385,11 @@ pub struct ControlsState {
     pub text_input: String,
     pub text_input_active: bool,
     pub text_cursor_pos: usize,
+    // Toggle states
+    pub stay_awake: bool,
+    pub wifi_enabled: bool,
+    pub bluetooth_enabled: bool,
+    pub airplane_mode: bool,
 }
 
 /// Performance page state.
@@ -476,6 +481,7 @@ pub struct SettingsState {
 /// Quick toggle definition.
 pub struct QuickToggle {
     pub name: &'static str,
+    pub desc: &'static str,
     pub namespace: &'static str,
     pub key: &'static str,
     pub enable_value: &'static str,
@@ -483,12 +489,12 @@ pub struct QuickToggle {
 }
 
 pub const QUICK_TOGGLES: &[QuickToggle] = &[
-    QuickToggle { name: "WIRELESS ADB", namespace: "global", key: "adb_wifi_enabled", enable_value: "1", disable_value: "0" },
-    QuickToggle { name: "SHOW TOUCHES", namespace: "system", key: "show_touches", enable_value: "1", disable_value: "0" },
-    QuickToggle { name: "POINTER LOC", namespace: "system", key: "pointer_location", enable_value: "1", disable_value: "0" },
-    QuickToggle { name: "STAY AWAKE", namespace: "global", key: "stay_on_while_plugged_in", enable_value: "3", disable_value: "0" },
-    QuickToggle { name: "GPU DEBUG", namespace: "global", key: "enable_gpu_debug_layers", enable_value: "1", disable_value: "0" },
-    QuickToggle { name: "ANIM SCALE", namespace: "global", key: "animator_duration_scale", enable_value: "1.0", disable_value: "0" },
+    QuickToggle { name: "WIRELESS ADB", desc: "Debug over network", namespace: "global", key: "adb_wifi_enabled", enable_value: "1", disable_value: "0" },
+    QuickToggle { name: "SHOW TOUCHES", desc: "Visual feedback", namespace: "system", key: "show_touches", enable_value: "1", disable_value: "0" },
+    QuickToggle { name: "POINTER LOC", desc: "Coordinate overlay", namespace: "system", key: "pointer_location", enable_value: "1", disable_value: "0" },
+    QuickToggle { name: "STAY AWAKE", desc: "Screen on while charging", namespace: "global", key: "stay_on_while_plugged_in", enable_value: "3", disable_value: "0" },
+    QuickToggle { name: "GPU DEBUG", desc: "Force GPU debug layers", namespace: "global", key: "enable_gpu_debug_layers", enable_value: "1", disable_value: "0" },
+    QuickToggle { name: "ANIM SCALE", desc: "Window animation scale", namespace: "global", key: "animator_duration_scale", enable_value: "1.0", disable_value: "0" },
 ];
 
 /// Bugreport history entry.
@@ -794,6 +800,10 @@ impl App {
                 text_input: String::new(),
                 text_input_active: false,
                 text_cursor_pos: 0,
+                stay_awake: false,
+                wifi_enabled: true,
+                bluetooth_enabled: true,
+                airplane_mode: false,
             },
             performance: PerfState {
                 cpu_history: Vec::new(),
@@ -1049,41 +1059,47 @@ impl App {
                 }
             }
             Page::Files => {
-                let max = self.files.entries.len().saturating_sub(1);
                 if delta < 0 {
                     self.files.selected_index =
                         self.files.selected_index.saturating_sub(delta.unsigned_abs() as usize);
                 } else {
+                    let max = self.files.entries.len().saturating_sub(1);
                     self.files.selected_index =
                         (self.files.selected_index + delta as usize).min(max);
                 }
             }
             Page::Apps => {
-                let max = self.apps.packages.len().saturating_sub(1);
                 if delta < 0 {
                     self.apps.selected_index =
                         self.apps.selected_index.saturating_sub(delta.unsigned_abs() as usize);
+                    self.apps.scroll_offset =
+                        self.apps.scroll_offset.saturating_sub(delta.unsigned_abs() as usize);
                 } else {
+                    let max = self.apps.packages.len().saturating_sub(1);
                     self.apps.selected_index =
                         (self.apps.selected_index + delta as usize).min(max);
+                    self.apps.scroll_offset += delta as usize;
                 }
             }
             Page::Settings => {
-                let max = self.settings.settings.len().saturating_sub(1);
                 if delta < 0 {
                     self.settings.selected_index =
                         self.settings.selected_index.saturating_sub(delta.unsigned_abs() as usize);
+                    self.settings.scroll_offset =
+                        self.settings.scroll_offset.saturating_sub(delta.unsigned_abs() as usize);
                 } else {
+                    let max = self.filtered_settings().len().saturating_sub(1);
                     self.settings.selected_index =
                         (self.settings.selected_index + delta as usize).min(max);
+                    self.settings.scroll_offset += delta as usize;
                 }
             }
             Page::Bugreport => {
-                let max = self.bugreport.history.len().saturating_sub(1);
                 if delta < 0 {
                     self.bugreport.selected_index =
                         self.bugreport.selected_index.saturating_sub(delta.unsigned_abs() as usize);
                 } else {
+                    let max = self.bugreport.history.len().saturating_sub(1);
                     self.bugreport.selected_index =
                         (self.bugreport.selected_index + delta as usize).min(max);
                 }
@@ -1641,6 +1657,7 @@ impl App {
             return self.handle_controls_text_input(key);
         }
 
+        // 6 sections: Power(0), Screen(1), Connectivity(2), Audio(3), TextInput(4), HardwareKeys(5)
         match key.code {
             KeyCode::Tab => {
                 self.controls.focus_section = (self.controls.focus_section + 1) % 6;
@@ -1657,15 +1674,50 @@ impl App {
                 AppAction::None
             }
             KeyCode::Down | KeyCode::Char('j') => {
-                self.controls.focus_item += 1;
+                let max_item = match self.controls.focus_section {
+                    0 => 2, // Power: 3 items
+                    1 => 2, // Screen: 3 items
+                    2 => 2, // Connectivity: 3 items
+                    3 => 1, // Audio: 2 items (Volume, Brightness)
+                    4 => 0, // Text Input: activates on focus
+                    5 => 7, // Hardware Keys: 8 items
+                    _ => 0,
+                };
+                self.controls.focus_item = (self.controls.focus_item + 1).min(max_item);
                 AppAction::None
             }
+            // Left/Right: adjust audio bars when in Audio section
+            KeyCode::Left | KeyCode::Char('h') if self.controls.focus_section == 3 => {
+                if self.controls.focus_item == 0 {
+                    self.controls.volume = self.controls.volume.saturating_sub(1);
+                    AppAction::ControlsExec("input keyevent 25".to_string())
+                } else {
+                    self.controls.brightness = self.controls.brightness.saturating_sub(25);
+                    AppAction::ControlsExec(format!("settings put system screen_brightness {}", self.controls.brightness))
+                }
+            }
+            KeyCode::Right | KeyCode::Char('l') if self.controls.focus_section == 3 => {
+                if self.controls.focus_item == 0 {
+                    self.controls.volume = (self.controls.volume + 1).min(15);
+                    AppAction::ControlsExec("input keyevent 24".to_string())
+                } else {
+                    self.controls.brightness = (self.controls.brightness + 25).min(255);
+                    AppAction::ControlsExec(format!("settings put system screen_brightness {}", self.controls.brightness))
+                }
+            }
             KeyCode::Enter => self.activate_control(),
+            // Audio hotkeys (work from any section)
             KeyCode::Char('+') | KeyCode::Char('=') => {
+                self.controls.volume = (self.controls.volume + 1).min(15);
                 AppAction::ControlsExec("input keyevent 24".to_string())
             }
             KeyCode::Char('-') => {
+                self.controls.volume = self.controls.volume.saturating_sub(1);
                 AppAction::ControlsExec("input keyevent 25".to_string())
+            }
+            KeyCode::Char('m') => {
+                self.controls.volume = 0;
+                AppAction::ControlsExec("input keyevent 164".to_string())
             }
             KeyCode::Char(']') => {
                 self.controls.brightness = (self.controls.brightness + 25).min(255);
@@ -1676,6 +1728,7 @@ impl App {
                 AppAction::ControlsExec(format!("settings put system screen_brightness {}", self.controls.brightness))
             }
             KeyCode::Char('i') => {
+                self.controls.focus_section = 4;
                 self.controls.text_input_active = true;
                 AppAction::None
             }
@@ -1718,7 +1771,6 @@ impl App {
     }
 
     fn activate_control(&mut self) -> AppAction {
-        // Map section + item to a command
         match self.controls.focus_section {
             0 => { // Power
                 let (cmd, label) = match self.controls.focus_item {
@@ -1739,26 +1791,52 @@ impl App {
                 match self.controls.focus_item {
                     0 => AppAction::ControlsExec("input keyevent 26".to_string()),
                     1 => AppAction::ControlsExec("input swipe 540 1800 540 800".to_string()),
-                    2 => AppAction::ControlsExec("svc power stayon true".to_string()),
-                    3 => AppAction::ControlsExec("svc power stayon false".to_string()),
+                    2 => {
+                        self.controls.stay_awake = !self.controls.stay_awake;
+                        if self.controls.stay_awake {
+                            AppAction::ControlsExec("svc power stayon true".to_string())
+                        } else {
+                            AppAction::ControlsExec("svc power stayon false".to_string())
+                        }
+                    }
                     _ => AppAction::None,
                 }
             }
             2 => { // Connectivity
                 match self.controls.focus_item {
-                    0 => AppAction::ControlsExec("svc wifi enable".to_string()),
-                    1 => AppAction::ControlsExec("svc wifi disable".to_string()),
-                    2 => AppAction::ControlsExec("settings put global airplane_mode_on 1 && am broadcast -a android.intent.action.AIRPLANE_MODE".to_string()),
-                    3 => AppAction::ControlsExec("settings put global airplane_mode_on 0 && am broadcast -a android.intent.action.AIRPLANE_MODE".to_string()),
+                    0 => {
+                        self.controls.wifi_enabled = !self.controls.wifi_enabled;
+                        if self.controls.wifi_enabled {
+                            AppAction::ControlsExec("svc wifi enable".to_string())
+                        } else {
+                            AppAction::ControlsExec("svc wifi disable".to_string())
+                        }
+                    }
+                    1 => {
+                        self.controls.bluetooth_enabled = !self.controls.bluetooth_enabled;
+                        if self.controls.bluetooth_enabled {
+                            AppAction::ControlsExec("svc bluetooth enable".to_string())
+                        } else {
+                            AppAction::ControlsExec("svc bluetooth disable".to_string())
+                        }
+                    }
+                    2 => {
+                        self.controls.airplane_mode = !self.controls.airplane_mode;
+                        if self.controls.airplane_mode {
+                            AppAction::ControlsExec("settings put global airplane_mode_on 1 && am broadcast -a android.intent.action.AIRPLANE_MODE".to_string())
+                        } else {
+                            AppAction::ControlsExec("settings put global airplane_mode_on 0 && am broadcast -a android.intent.action.AIRPLANE_MODE".to_string())
+                        }
+                    }
                     _ => AppAction::None,
                 }
             }
-            3 => { // Audio & Display
-                match self.controls.focus_item {
-                    0 => AppAction::ControlsExec("input keyevent 24".to_string()),
-                    1 => AppAction::ControlsExec("input keyevent 25".to_string()),
-                    2 => AppAction::ControlsExec("input keyevent 164".to_string()),
-                    _ => AppAction::None,
+            3 => { // Audio & Display — Enter on volume mutes
+                if self.controls.focus_item == 0 {
+                    self.controls.volume = 0;
+                    AppAction::ControlsExec("input keyevent 164".to_string())
+                } else {
+                    AppAction::None
                 }
             }
             4 => { // Text input

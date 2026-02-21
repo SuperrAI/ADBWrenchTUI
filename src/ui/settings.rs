@@ -6,38 +6,38 @@ use ratatui::Frame;
 
 use crate::app::{App, SettingsFocus, SettingsNamespace, QUICK_TOGGLES};
 use crate::components::{
-    render_keybinding_footer, render_tab_bar, render_text_input, toggle_span, truncate_str,
+    render_keybinding_footer, render_text_input, toggle_span, truncate_str,
 };
 use crate::theme::Theme;
 
 /// Render the Settings page.
 pub fn render(app: &App, frame: &mut Frame, area: Rect) {
     let chunks = Layout::vertical([
-        Constraint::Length(2), // header
-        Constraint::Length(5), // quick toggles
-        Constraint::Length(1), // namespace tabs
-        Constraint::Length(1), // search bar
-        Constraint::Min(0),   // settings list
-        Constraint::Length(1), // footer
+        Constraint::Length(2),  // header
+        Constraint::Length(1),  // spacer
+        Constraint::Length(7),  // quick toggles (5 content + 2 border)
+        Constraint::Length(1),  // spacer
+        Constraint::Length(1),  // namespace tabs + search (combined row)
+        Constraint::Min(0),    // settings list
+        Constraint::Length(1),  // footer
     ])
     .split(area);
 
     render_header(app, frame, chunks[0]);
 
     if !app.device_manager.is_connected() {
-        super::render_disconnected(frame, chunks[4]);
-        render_footer(frame, chunks[5]);
+        super::render_disconnected(frame, chunks[5]);
+        render_footer(frame, chunks[6]);
         return;
     }
 
-    render_quick_toggles(app, frame, chunks[1]);
-    render_namespace_tabs(app, frame, chunks[2]);
-    render_search_bar(app, frame, chunks[3]);
-    render_settings_list(app, frame, chunks[4]);
-    render_footer(frame, chunks[5]);
+    render_quick_toggles(app, frame, chunks[2]);
+    render_tabs_and_search(app, frame, chunks[4]);
+    render_settings_list(app, frame, chunks[5]);
+    render_footer(frame, chunks[6]);
 }
 
-/// Header with title and loading state.
+/// Header with title and count.
 fn render_header(app: &App, frame: &mut Frame, area: Rect) {
     let filtered = app.filtered_settings();
     let total = app.settings.settings.len();
@@ -56,7 +56,7 @@ fn render_header(app: &App, frame: &mut Frame, area: Rect) {
     }
 
     if app.settings.loading {
-        spans.push(Span::styled("  ⟳ loading", Theme::warning()));
+        spans.push(Span::styled("  \u{27f3} loading", Theme::warning()));
     }
 
     frame.render_widget(
@@ -65,7 +65,7 @@ fn render_header(app: &App, frame: &mut Frame, area: Rect) {
     );
 }
 
-/// Quick toggles grid (3x2).
+/// Quick toggles grid (3x2) with descriptions.
 fn render_quick_toggles(app: &App, frame: &mut Frame, area: Rect) {
     let is_focused = app.settings.focus_area == SettingsFocus::QuickToggles;
     let border_style = if is_focused {
@@ -84,94 +84,129 @@ fn render_quick_toggles(app: &App, frame: &mut Frame, area: Rect) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    // 3 columns x 2 rows
+    // 2 groups of rows: (name row, desc row, spacer) x 2 minus last spacer
     let rows = Layout::vertical([
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Min(0),
+        Constraint::Length(1), // row 1 names
+        Constraint::Length(1), // row 1 descriptions
+        Constraint::Length(1), // spacer
+        Constraint::Length(1), // row 2 names
+        Constraint::Length(1), // row 2 descriptions
     ])
     .split(inner);
 
-    for row_idx in 0..2 {
-        let cols = Layout::horizontal([
-            Constraint::Percentage(34),
-            Constraint::Percentage(33),
-            Constraint::Percentage(33),
-        ])
-        .split(rows[row_idx]);
+    let col_layout = [
+        Constraint::Ratio(1, 3),
+        Constraint::Ratio(1, 3),
+        Constraint::Ratio(1, 3),
+    ];
 
-        for col_idx in 0..3 {
-            let toggle_idx = row_idx * 3 + col_idx;
-            if toggle_idx < QUICK_TOGGLES.len() {
-                let toggle = &QUICK_TOGGLES[toggle_idx];
-                let is_on = app.settings.quick_toggle_states[toggle_idx];
-                let is_selected = is_focused && app.settings.quick_toggle_focus == toggle_idx;
+    // Row 1: toggles 0-2
+    let cols_r1 = Layout::horizontal(col_layout).split(rows[0]);
+    let desc_r1 = Layout::horizontal(col_layout).split(rows[1]);
+    for col_idx in 0..3 {
+        render_toggle_cell(app, frame, cols_r1[col_idx], desc_r1[col_idx], col_idx, is_focused);
+    }
 
-                let name_style = if is_selected {
-                    Theme::accent_bold()
-                } else {
-                    Theme::text()
-                };
-                let prefix = if is_selected { "▸ " } else { "  " };
-
-                let line = Line::from(vec![
-                    Span::styled(prefix, name_style),
-                    Span::styled(toggle.name, name_style),
-                    Span::styled(" ", Style::default()),
-                    toggle_span(is_on),
-                ]);
-                frame.render_widget(Paragraph::new(line), cols[col_idx]);
-            }
-        }
+    // Row 2: toggles 3-5
+    let cols_r2 = Layout::horizontal(col_layout).split(rows[3]);
+    let desc_r2 = Layout::horizontal(col_layout).split(rows[4]);
+    for col_idx in 0..3 {
+        render_toggle_cell(app, frame, cols_r2[col_idx], desc_r2[col_idx], 3 + col_idx, is_focused);
     }
 }
 
-/// Namespace tab bar.
-fn render_namespace_tabs(app: &App, frame: &mut Frame, area: Rect) {
-    render_tab_bar(frame, area, &[
-        (
-            SettingsNamespace::System.label(),
-            app.settings.namespace == SettingsNamespace::System,
-        ),
-        (
-            SettingsNamespace::Secure.label(),
-            app.settings.namespace == SettingsNamespace::Secure,
-        ),
-        (
-            SettingsNamespace::Global.label(),
-            app.settings.namespace == SettingsNamespace::Global,
-        ),
+/// Render a single toggle cell (name line + description line).
+fn render_toggle_cell(
+    app: &App,
+    frame: &mut Frame,
+    name_area: Rect,
+    desc_area: Rect,
+    toggle_idx: usize,
+    section_focused: bool,
+) {
+    if toggle_idx >= QUICK_TOGGLES.len() {
+        return;
+    }
+
+    let toggle = &QUICK_TOGGLES[toggle_idx];
+    let is_on = app.settings.quick_toggle_states[toggle_idx];
+    let is_selected = section_focused && app.settings.quick_toggle_focus == toggle_idx;
+
+    let name_style = if is_selected {
+        Theme::accent_bold()
+    } else {
+        Theme::text()
+    };
+    let prefix = if is_selected { "\u{25b8} " } else { "  " };
+
+    // Name + toggle state
+    let name_line = Line::from(vec![
+        Span::styled(prefix, name_style),
+        Span::styled(toggle.name, name_style),
+        Span::raw(" "),
+        toggle_span(is_on),
     ]);
+    frame.render_widget(Paragraph::new(name_line), name_area);
+
+    // Description
+    let desc_line = Line::from(vec![
+        Span::raw("    "),
+        Span::styled(toggle.desc, Theme::muted()),
+    ]);
+    frame.render_widget(Paragraph::new(desc_line), desc_area);
 }
 
-/// Search bar.
-fn render_search_bar(app: &App, frame: &mut Frame, area: Rect) {
+/// Namespace tabs + search on a single row.
+fn render_tabs_and_search(app: &App, frame: &mut Frame, area: Rect) {
+    let cols = Layout::horizontal([
+        Constraint::Min(0),    // tabs
+        Constraint::Length(30), // search
+    ])
+    .split(area);
+
+    // Tabs
+    let mut tab_spans = Vec::new();
+    tab_spans.push(Span::raw(" "));
+    for ns in &[SettingsNamespace::System, SettingsNamespace::Secure, SettingsNamespace::Global] {
+        if app.settings.namespace == *ns {
+            tab_spans.push(Span::styled(format!("[{}]", ns.label()), Theme::accent_bold()));
+        } else {
+            tab_spans.push(Span::styled(format!("[{}]", ns.label()), Theme::muted()));
+        }
+        tab_spans.push(Span::raw(" "));
+    }
+    frame.render_widget(
+        Paragraph::new(Line::from(tab_spans)).style(Style::default().bg(Theme::BG)),
+        cols[0],
+    );
+
+    // Search
     if app.settings.search_active {
         render_text_input(
             frame,
-            area,
+            cols[1],
             &app.settings.search_query,
             app.settings.search_query.len(),
-            " SEARCH: ",
+            "/",
             true,
         );
     } else {
         let display = if app.settings.search_query.is_empty() {
-            Span::styled(" SEARCH: (press /)", Theme::muted())
+            Span::styled("/ search", Theme::muted())
         } else {
             Span::styled(
-                format!(" SEARCH: {}", app.settings.search_query),
+                format!("/{}", app.settings.search_query),
                 Theme::dim(),
             )
         };
         frame.render_widget(
             Paragraph::new(Line::from(display)).style(Style::default().bg(Theme::BG)),
-            area,
+            cols[1],
         );
     }
 }
 
-/// Scrollable settings list.
+/// Scrollable settings list with column headers.
 fn render_settings_list(app: &App, frame: &mut Frame, area: Rect) {
     let is_focused = app.settings.focus_area == SettingsFocus::List;
     let border_style = if is_focused {
@@ -198,6 +233,8 @@ fn render_settings_list(app: &App, frame: &mut Frame, area: Rect) {
     if filtered.is_empty() {
         let msg = if app.settings.loading {
             "Loading settings..."
+        } else if app.settings.settings.is_empty() {
+            "Press r to load settings"
         } else {
             "No settings found"
         };
@@ -213,15 +250,39 @@ fn render_settings_list(app: &App, frame: &mut Frame, area: Rect) {
         return;
     }
 
-    let visible_height = inner.height as usize;
-    let selected = app.settings.selected_index;
-    let scroll = app.settings.scroll_offset;
-    let available_width = inner.width as usize;
+    // Split: column header + list
+    let list_chunks = Layout::vertical([
+        Constraint::Length(1), // column header
+        Constraint::Min(0),   // list rows
+    ])
+    .split(inner);
 
-    // Key-value layout: key = value [EDIT] [DEL]
-    let action_width = 12; // " [EDIT] [DEL]"
+    let available_width = inner.width as usize;
     let key_width = available_width / 3;
-    let value_width = available_width.saturating_sub(key_width + action_width + 4);
+    let value_width = available_width.saturating_sub(key_width + 4);
+
+    // Column header
+    let header_line = Line::from(vec![
+        Span::styled(format!(" {:<width$}", "KEY", width = key_width), Theme::muted()),
+        Span::styled("   ", Theme::muted()),
+        Span::styled(format!("{:<width$}", "VALUE", width = value_width), Theme::muted()),
+    ]);
+    frame.render_widget(
+        Paragraph::new(header_line).style(Style::default().bg(Theme::BG)),
+        list_chunks[0],
+    );
+
+    // List rows
+    let visible_height = list_chunks[1].height as usize;
+    let selected = app.settings.selected_index.min(filtered.len().saturating_sub(1));
+
+    // Compute effective scroll that keeps selection visible
+    let mut scroll = app.settings.scroll_offset;
+    if selected < scroll {
+        scroll = selected;
+    } else if visible_height > 0 && selected >= scroll + visible_height {
+        scroll = selected - visible_height + 1;
+    }
 
     let mut lines: Vec<Line> = Vec::with_capacity(visible_height);
 
@@ -251,8 +312,7 @@ fn render_settings_list(app: &App, frame: &mut Frame, area: Rect) {
         ];
 
         if is_selected {
-            spans.push(Span::styled(" [e:EDIT]", Theme::accent()));
-            spans.push(Span::styled(" [d:DEL]", Theme::error()));
+            spans.push(Span::styled(" [e] [d]", Theme::accent()));
         }
 
         lines.push(Line::from(spans).style(row_style));
@@ -265,7 +325,7 @@ fn render_settings_list(app: &App, frame: &mut Frame, area: Rect) {
 
     frame.render_widget(
         Paragraph::new(lines).style(Style::default().bg(Theme::BG)),
-        inner,
+        list_chunks[1],
     );
 }
 

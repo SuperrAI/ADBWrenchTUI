@@ -169,9 +169,16 @@ fn render_package_list(app: &App, frame: &mut Frame, area: Rect) {
     }
 
     let visible_height = inner.height as usize;
-    let selected = app.apps.selected_index;
-    let scroll_offset = app.apps.scroll_offset;
+    let selected = app.apps.selected_index.min(filtered.len().saturating_sub(1));
     let available_width = inner.width as usize;
+
+    // Compute effective scroll that keeps selection visible
+    let mut scroll_offset = app.apps.scroll_offset;
+    if selected < scroll_offset {
+        scroll_offset = selected;
+    } else if visible_height > 0 && selected >= scroll_offset + visible_height {
+        scroll_offset = selected - visible_height + 1;
+    }
 
     let mut lines: Vec<Line> = Vec::with_capacity(visible_height);
 
