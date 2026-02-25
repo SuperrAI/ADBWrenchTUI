@@ -1,11 +1,11 @@
+use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
-use ratatui::Frame;
 
-use crate::app::{App, LogcatControl, LogcatFocus};
 use crate::adb::types::LogLevel;
+use crate::app::{App, LogcatControl, LogcatFocus};
 use crate::components::{render_keybinding_footer, truncate_str};
 use crate::theme::Theme;
 
@@ -15,7 +15,7 @@ pub fn render(app: &App, frame: &mut Frame, area: Rect) {
         Constraint::Length(2), // header
         Constraint::Length(1), // control bar
         Constraint::Length(1), // search/tag display
-        Constraint::Min(0),   // log area
+        Constraint::Min(0),    // log area
         Constraint::Length(1), // footer
     ])
     .split(area);
@@ -57,6 +57,13 @@ fn render_header(app: &App, frame: &mut Frame, area: Rect) {
         } else {
             spans.push(Span::styled("  ○ PAUSED", Theme::muted()));
         }
+
+        if app.logcat.dropped_lines > 0 {
+            spans.push(Span::styled(
+                format!("  DROP:{}", app.logcat.dropped_lines),
+                Theme::warning(),
+            ));
+        }
     }
 
     frame.render_widget(
@@ -79,7 +86,11 @@ fn render_control_bar(app: &App, frame: &mut Frame, area: Rect) {
 
         let (label, active) = match ctrl {
             LogcatControl::StartStop => {
-                if app.logcat.is_streaming { ("STOP", true) } else { ("START", false) }
+                if app.logcat.is_streaming {
+                    ("STOP", true)
+                } else {
+                    ("START", false)
+                }
             }
             LogcatControl::Buffer => (app.logcat.buffer.label(), false),
             LogcatControl::Search => ("SEARCH", !app.logcat.search_query.is_empty()),
@@ -109,14 +120,22 @@ fn render_control_bar(app: &App, frame: &mut Frame, area: Rect) {
         let style = if is_sel {
             Theme::accent_bold()
         } else if let Some(lc) = level_color {
-            if active { Style::default().fg(lc) } else { Theme::muted() }
+            if active {
+                Style::default().fg(lc)
+            } else {
+                Theme::muted()
+            }
         } else if active {
             Theme::accent()
         } else {
             Theme::muted()
         };
 
-        let bracket_style = if is_sel { Theme::accent_bold() } else { Theme::muted() };
+        let bracket_style = if is_sel {
+            Theme::accent_bold()
+        } else {
+            Theme::muted()
+        };
 
         if is_sel {
             spans.push(Span::styled("▸", Theme::accent()));
@@ -174,35 +193,91 @@ fn render_filter_display(app: &App, frame: &mut Frame, area: Rect) {
 /// Render the log entries.
 fn render_logs(app: &App, frame: &mut Frame, area: Rect) {
     let visible_height = area.height as usize;
+    if visible_height == 0 {
+        return;
+    }
 
-    // Apply filters
-    let filtered: Vec<_> = app.logcat.logs.iter().filter(|entry| {
-        let level_idx = match entry.level {
-            LogLevel::Verbose => 0,
-            LogLevel::Debug => 1,
-            LogLevel::Info => 2,
-            LogLevel::Warn => 3,
-            LogLevel::Error => 4,
-            LogLevel::Fatal => 5,
+    let level_enabled = app.logcat.level_filter;
+    let has_tag_filter = !app.logcat.tag_filter.is_empty();
+    let has_search_filter = !app.logcat.search_query.is_empty();
+    let all_levels_enabled = level_enabled.iter().all(|v| *v);
+
+    let compute_window = |total: usize| {
+        let max_offset = total.saturating_sub(visible_height);
+        let offset_from_bottom = if app.logcat.auto_scroll {
+            0
+        } else {
+            app.logcat.scroll_offset.min(max_offset)
         };
-        if !app.logcat.level_filter[level_idx] {
-            return false;
+        let start = total.saturating_sub(visible_height + offset_from_bottom);
+        let end = (start + visible_height).min(total);
+        (start, end)
+    };
+
+    let available_width = area.width as usize;
+    let mut lines: Vec<Line> = Vec::with_capacity(visible_height);
+
+    // Fast path: no active filters and all levels enabled.
+    if all_levels_enabled && !has_tag_filter && !has_search_filter {
+        let total = app.logcat.logs.len();
+        if total == 0 {
+            let hint = Paragraph::new(Span::styled(
+                "Navigate to START and press Enter",
+                Theme::muted(),
+            ))
+            .alignment(Alignment::Center);
+            let centered = Layout::vertical([
+                Constraint::Fill(1),
+                Constraint::Length(1),
+                Constraint::Fill(1),
+            ])
+            .split(area);
+            frame.render_widget(hint, centered[1]);
+            return;
         }
-        if !app.logcat.tag_filter.is_empty()
-            && !entry.tag.to_lowercase().contains(&app.logcat.tag_filter.to_lowercase())
-        {
-            return false;
+
+        let (start, end) = compute_window(total);
+        for entry in app.logcat.logs.iter().take(end).skip(start) {
+            lines.push(render_log_line(
+                entry,
+                app.logcat.show_timestamp,
+                available_width,
+            ));
         }
-        if !app.logcat.search_query.is_empty() {
-            let query_lower = app.logcat.search_query.to_lowercase();
-            if !entry.message.to_lowercase().contains(&query_lower)
-                && !entry.tag.to_lowercase().contains(&query_lower)
+        while lines.len() < visible_height {
+            lines.push(Line::from(""));
+        }
+        frame.render_widget(
+            Paragraph::new(lines).style(Style::default().bg(Theme::BG)),
+            area,
+        );
+        return;
+    }
+
+    // Filtered path.
+    let filtered: Vec<_> = app
+        .logcat
+        .logs
+        .iter()
+        .filter(|entry| {
+            let level_idx = level_index(entry.level);
+            if !level_enabled[level_idx] {
+                return false;
+            }
+            if has_tag_filter
+                && !contains_case_insensitive_ascii(&entry.tag, &app.logcat.tag_filter)
             {
                 return false;
             }
-        }
-        true
-    }).collect();
+            if has_search_filter
+                && !contains_case_insensitive_ascii(&entry.message, &app.logcat.search_query)
+                && !contains_case_insensitive_ascii(&entry.tag, &app.logcat.search_query)
+            {
+                return false;
+            }
+            true
+        })
+        .collect();
 
     if filtered.is_empty() {
         let msg = if app.logcat.logs.is_empty() {
@@ -210,8 +285,7 @@ fn render_logs(app: &App, frame: &mut Frame, area: Rect) {
         } else {
             "No entries match filters"
         };
-        let hint = Paragraph::new(Span::styled(msg, Theme::muted()))
-            .alignment(Alignment::Center);
+        let hint = Paragraph::new(Span::styled(msg, Theme::muted())).alignment(Alignment::Center);
         let centered = Layout::vertical([
             Constraint::Fill(1),
             Constraint::Length(1),
@@ -223,57 +297,13 @@ fn render_logs(app: &App, frame: &mut Frame, area: Rect) {
     }
 
     let total = filtered.len();
-    let scroll = app.logcat.scroll_offset.min(total.saturating_sub(visible_height));
-    let available_width = area.width as usize;
-
-    let mut lines: Vec<Line> = Vec::with_capacity(visible_height);
-
-    for i in scroll..(scroll + visible_height).min(total) {
-        let entry = filtered[i];
-
-        let level_color = match entry.level {
-            LogLevel::Verbose => Theme::LOG_VERBOSE,
-            LogLevel::Debug => Theme::LOG_DEBUG,
-            LogLevel::Info => Theme::LOG_INFO,
-            LogLevel::Warn => Theme::LOG_WARN,
-            LogLevel::Error => Theme::LOG_ERROR,
-            LogLevel::Fatal => Theme::LOG_FATAL,
-        };
-
-        let mut spans = Vec::new();
-        spans.push(Span::raw(" "));
-
-        if app.logcat.show_timestamp && !entry.timestamp.is_empty() {
-            spans.push(Span::styled(
-                truncate_str(&entry.timestamp, 18),
-                Theme::muted(),
-            ));
-            spans.push(Span::raw(" "));
-        }
-
-        spans.push(Span::styled(
-            entry.level.label(),
-            Style::default().fg(level_color),
+    let (start, end) = compute_window(total);
+    for entry in filtered.iter().take(end).skip(start) {
+        lines.push(render_log_line(
+            entry,
+            app.logcat.show_timestamp,
+            available_width,
         ));
-        spans.push(Span::raw(" "));
-
-        let tag_max = 20.min(available_width / 4);
-        if !entry.tag.is_empty() {
-            spans.push(Span::styled(
-                truncate_str(&entry.tag, tag_max),
-                Theme::dim(),
-            ));
-            spans.push(Span::styled(": ", Theme::muted()));
-        }
-
-        let used_width: usize = spans.iter().map(|s| s.content.len()).sum();
-        let msg_max = available_width.saturating_sub(used_width);
-        spans.push(Span::styled(
-            truncate_str(&entry.message, msg_max),
-            Theme::text(),
-        ));
-
-        lines.push(Line::from(spans));
     }
 
     while lines.len() < visible_height {
@@ -286,13 +316,95 @@ fn render_logs(app: &App, frame: &mut Frame, area: Rect) {
     );
 }
 
+fn level_index(level: LogLevel) -> usize {
+    match level {
+        LogLevel::Verbose => 0,
+        LogLevel::Debug => 1,
+        LogLevel::Info => 2,
+        LogLevel::Warn => 3,
+        LogLevel::Error => 4,
+        LogLevel::Fatal => 5,
+    }
+}
+
+fn contains_case_insensitive_ascii(haystack: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    let h = haystack.as_bytes();
+    let n = needle.as_bytes();
+    if n.len() > h.len() {
+        return false;
+    }
+    h.windows(n.len()).any(|window| {
+        window
+            .iter()
+            .zip(n.iter())
+            .all(|(a, b)| a.eq_ignore_ascii_case(b))
+    })
+}
+
+fn render_log_line(
+    entry: &crate::adb::types::LogEntry,
+    show_timestamp: bool,
+    available_width: usize,
+) -> Line<'static> {
+    let level_color = match entry.level {
+        LogLevel::Verbose => Theme::LOG_VERBOSE,
+        LogLevel::Debug => Theme::LOG_DEBUG,
+        LogLevel::Info => Theme::LOG_INFO,
+        LogLevel::Warn => Theme::LOG_WARN,
+        LogLevel::Error => Theme::LOG_ERROR,
+        LogLevel::Fatal => Theme::LOG_FATAL,
+    };
+
+    let mut spans = Vec::new();
+    spans.push(Span::raw(" "));
+
+    if show_timestamp && !entry.timestamp.is_empty() {
+        spans.push(Span::styled(
+            truncate_str(&entry.timestamp, 18),
+            Theme::muted(),
+        ));
+        spans.push(Span::raw(" "));
+    }
+
+    spans.push(Span::styled(
+        entry.level.label().to_string(),
+        Style::default().fg(level_color),
+    ));
+    spans.push(Span::raw(" "));
+
+    let tag_max = 20.min(available_width / 4);
+    if !entry.tag.is_empty() {
+        spans.push(Span::styled(
+            truncate_str(&entry.tag, tag_max),
+            Theme::dim(),
+        ));
+        spans.push(Span::styled(": ", Theme::muted()));
+    }
+
+    let used_width: usize = spans.iter().map(|s| s.content.len()).sum();
+    let msg_max = available_width.saturating_sub(used_width);
+    spans.push(Span::styled(
+        truncate_str(&entry.message, msg_max),
+        Theme::text(),
+    ));
+
+    Line::from(spans)
+}
+
 /// Footer with keybinding hints.
 fn render_footer(frame: &mut Frame, area: Rect) {
-    render_keybinding_footer(frame, area, &[
-        ("Tab", "focus"),
-        ("←/→", "control"),
-        ("Enter", "activate"),
-        ("j/k", "scroll"),
-        ("g/G", "top/bottom"),
-    ]);
+    render_keybinding_footer(
+        frame,
+        area,
+        &[
+            ("Tab", "focus"),
+            ("←/→", "control"),
+            ("Enter", "activate"),
+            ("j/k", "scroll"),
+            ("g/G", "top/bottom"),
+        ],
+    );
 }

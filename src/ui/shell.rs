@@ -1,8 +1,8 @@
+use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
-use ratatui::Frame;
 
 use crate::app::{App, ShellEntryType};
 use crate::components::{render_keybinding_footer, render_text_input};
@@ -25,7 +25,7 @@ pub fn render(app: &App, frame: &mut Frame, area: Rect) {
     let chunks = Layout::vertical([
         Constraint::Length(2), // header
         Constraint::Length(1), // presets
-        Constraint::Min(0),   // output
+        Constraint::Min(0),    // output
         Constraint::Length(1), // input
         Constraint::Length(1), // footer
     ])
@@ -144,11 +144,7 @@ fn render_output(app: &App, frame: &mut Frame, area: Rect) {
 
 /// Input line at the bottom.
 fn render_input(app: &App, frame: &mut Frame, area: Rect) {
-    let cols = Layout::horizontal([
-        Constraint::Min(0),
-        Constraint::Length(8),
-    ])
-    .split(area);
+    let cols = Layout::horizontal([Constraint::Min(0), Constraint::Length(8)]).split(area);
 
     render_text_input(
         frame,
@@ -173,12 +169,16 @@ fn render_input(app: &App, frame: &mut Frame, area: Rect) {
 
 /// Footer with keybinding hints.
 fn render_footer(frame: &mut Frame, area: Rect) {
-    render_keybinding_footer(frame, area, &[
-        ("Enter", "run"),
-        ("↑/↓", "history"),
-        ("Ctrl+C", "stop"),
-        ("c", "clear"),
-        ("t", "timeout"),
-        ("1-8", "preset"),
-    ]);
+    render_keybinding_footer(
+        frame,
+        area,
+        &[
+            ("Enter", "run"),
+            ("↑/↓", "history"),
+            ("Ctrl+C", "stop"),
+            ("c", "clear"),
+            ("t", "timeout"),
+            ("1-8", "preset"),
+        ],
+    );
 }

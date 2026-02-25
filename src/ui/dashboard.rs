@@ -1,8 +1,8 @@
+use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
-use ratatui::Frame;
 
 use crate::app::{App, DashboardSection};
 use crate::components::{render_gauge, render_keybinding_footer, render_sparkline, truncate_str};
@@ -11,7 +11,7 @@ use crate::theme::Theme;
 pub fn render(app: &App, frame: &mut Frame, area: Rect) {
     let chunks = Layout::vertical([
         Constraint::Length(2), // header
-        Constraint::Min(0),   // content
+        Constraint::Min(0),    // content
         Constraint::Length(1), // footer
     ])
     .split(area);
@@ -43,11 +43,11 @@ pub fn render(app: &App, frame: &mut Frame, area: Rect) {
     // Row 5: Memory sparkline
     // Row 6: Process table (fills remaining)
     let rows = Layout::vertical([
-        Constraint::Length(8),  // row 1: info cards
-        Constraint::Length(8),  // row 2: battery + storage
-        Constraint::Length(3),  // row 3: CPU + Memory gauges
-        Constraint::Length(3),  // row 4: CPU sparkline
-        Constraint::Length(3),  // row 5: Memory sparkline
+        Constraint::Length(8), // row 1: info cards
+        Constraint::Length(8), // row 2: battery + storage
+        Constraint::Length(3), // row 3: CPU + Memory gauges
+        Constraint::Length(3), // row 4: CPU sparkline
+        Constraint::Length(3), // row 5: Memory sparkline
         Constraint::Min(0),    // row 6: process table
     ])
     .split(content);
@@ -65,21 +65,15 @@ pub fn render(app: &App, frame: &mut Frame, area: Rect) {
     render_info_card(app, frame, info_cols[2], DashboardSection::Software);
 
     // Row 2: Battery, Storage
-    let gauge_cols = Layout::horizontal([
-        Constraint::Percentage(50),
-        Constraint::Percentage(50),
-    ])
-    .split(rows[1]);
+    let gauge_cols =
+        Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).split(rows[1]);
 
     render_battery_card(app, frame, gauge_cols[0]);
     render_storage_card(app, frame, gauge_cols[1]);
 
     // Row 3: CPU + Memory KPI gauges (no battery — already shown above)
-    let kpi_cols = Layout::horizontal([
-        Constraint::Percentage(50),
-        Constraint::Percentage(50),
-    ])
-    .split(rows[2]);
+    let kpi_cols =
+        Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).split(rows[2]);
 
     render_kpi_card(app, frame, kpi_cols[0], "CPU");
     render_kpi_card(app, frame, kpi_cols[1], "MEMORY");
@@ -142,13 +136,17 @@ fn render_header(app: &App, frame: &mut Frame, area: Rect) {
 // ── Footer ────────────────────────────────────────────────────────
 
 fn render_footer(_app: &App, frame: &mut Frame, area: Rect) {
-    render_keybinding_footer(frame, area, &[
-        ("r", "refresh"),
-        ("a", "auto"),
-        ("Tab", "section"),
-        ("j/k", "item"),
-        ("c", "copy"),
-    ]);
+    render_keybinding_footer(
+        frame,
+        area,
+        &[
+            ("r", "refresh"),
+            ("a", "auto"),
+            ("Tab", "section"),
+            ("j/k", "item"),
+            ("c", "copy"),
+        ],
+    );
 }
 
 // ── Loading state ─────────────────────────────────────────────────
@@ -251,7 +249,11 @@ fn render_info_card(app: &App, frame: &mut Frame, area: Rect, section: Dashboard
         .border_type(BorderType::Rounded)
         .title(Span::styled(
             format!(" {} ", section_title(section)),
-            if is_focused { Theme::accent_bold() } else { Theme::title() },
+            if is_focused {
+                Theme::accent_bold()
+            } else {
+                Theme::title()
+            },
         ))
         .style(Style::default().bg(Theme::BG));
 
@@ -317,7 +319,13 @@ fn render_battery_card(app: &App, frame: &mut Frame, area: Rect) {
         ])
         .split(inner);
 
-        render_gauge(frame, rows[0], level_pct, &format!(" {}%", bat.level), bar_color);
+        render_gauge(
+            frame,
+            rows[0],
+            level_pct,
+            &format!(" {}%", bat.level),
+            bar_color,
+        );
 
         frame.render_widget(Paragraph::new(kv_line("Status", &bat.status)), rows[2]);
         frame.render_widget(Paragraph::new(kv_line("Health", &bat.health)), rows[3]);
@@ -357,7 +365,13 @@ fn render_storage_card(app: &App, frame: &mut Frame, area: Rect) {
         ])
         .split(inner);
 
-        render_gauge(frame, rows[0], ratio, &format!(" {:.0}%", st.usage_percent), bar_color);
+        render_gauge(
+            frame,
+            rows[0],
+            ratio,
+            &format!(" {:.0}%", st.usage_percent),
+            bar_color,
+        );
 
         frame.render_widget(Paragraph::new(kv_line("Total", &st.total)), rows[2]);
         frame.render_widget(Paragraph::new(kv_line("Used", &st.used)), rows[3]);
@@ -430,11 +444,7 @@ fn render_cpu_sparkline(app: &App, frame: &mut Frame, area: Rect) {
     let data = &app.performance.cpu_history;
     let (min, avg, max) = compute_stats(data);
 
-    let rows = Layout::vertical([
-        Constraint::Length(1),
-        Constraint::Min(0),
-    ])
-    .split(area);
+    let rows = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(area);
 
     let stats_line = Line::from(vec![
         Span::styled(" CPU", Theme::dim()),
@@ -464,11 +474,7 @@ fn render_mem_sparkline(app: &App, frame: &mut Frame, area: Rect) {
     let total_mb = app.performance.mem_total_kb as f64 / 1024.0;
     let used_mb = app.performance.mem_used_kb as f64 / 1024.0;
 
-    let rows = Layout::vertical([
-        Constraint::Length(1),
-        Constraint::Min(0),
-    ])
-    .split(area);
+    let rows = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(area);
 
     let stats_line = Line::from(vec![
         Span::styled(" MEM", Theme::dim()),
@@ -497,11 +503,19 @@ fn render_process_table(app: &App, frame: &mut Frame, area: Rect) {
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(if is_focused { Theme::border_active() } else { Theme::border() })
+        .border_style(if is_focused {
+            Theme::border_active()
+        } else {
+            Theme::border()
+        })
         .border_type(BorderType::Rounded)
         .title(Span::styled(
             format!(" PROCESSES ({}) ", app.performance.processes.len()),
-            if is_focused { Theme::accent_bold() } else { Theme::title() },
+            if is_focused {
+                Theme::accent_bold()
+            } else {
+                Theme::title()
+            },
         ))
         .style(Style::default().bg(Theme::BG));
 
@@ -530,7 +544,8 @@ fn render_process_table(app: &App, frame: &mut Frame, area: Rect) {
             current_scroll
         }
     } else {
-        app.performance.scroll_offset
+        app.performance
+            .scroll_offset
             .min(procs.len().saturating_sub(data_rows))
     };
 
@@ -598,9 +613,21 @@ fn render_process_table(app: &App, frame: &mut Frame, area: Rect) {
             }
         };
 
-        let name_style = if is_selected { Theme::accent_bold() } else { Theme::text() };
-        let pid_style = if is_selected { Theme::accent() } else { Theme::muted() };
-        let dim_style = if is_selected { Theme::accent() } else { Theme::dim() };
+        let name_style = if is_selected {
+            Theme::accent_bold()
+        } else {
+            Theme::text()
+        };
+        let pid_style = if is_selected {
+            Theme::accent()
+        } else {
+            Theme::muted()
+        };
+        let dim_style = if is_selected {
+            Theme::accent()
+        } else {
+            Theme::dim()
+        };
 
         lines.push(
             Line::from(vec![

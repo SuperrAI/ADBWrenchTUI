@@ -31,8 +31,7 @@ impl EventHandler {
 
         tokio::spawn(async move {
             loop {
-                let event_available =
-                    event::poll(tick_rate).unwrap_or(false);
+                let event_available = event::poll(tick_rate).unwrap_or(false);
 
                 if event_available {
                     match event::read() {

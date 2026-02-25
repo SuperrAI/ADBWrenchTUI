@@ -1,25 +1,23 @@
+use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
-use ratatui::Frame;
 
-use crate::app::{App, SettingsFocus, SettingsNamespace, QUICK_TOGGLES};
-use crate::components::{
-    render_keybinding_footer, render_text_input, toggle_span, truncate_str,
-};
+use crate::app::{App, QUICK_TOGGLES, SettingsFocus, SettingsNamespace};
+use crate::components::{render_keybinding_footer, render_text_input, toggle_span, truncate_str};
 use crate::theme::Theme;
 
 /// Render the Settings page.
 pub fn render(app: &App, frame: &mut Frame, area: Rect) {
     let chunks = Layout::vertical([
-        Constraint::Length(2),  // header
-        Constraint::Length(1),  // spacer
-        Constraint::Length(7),  // quick toggles (5 content + 2 border)
-        Constraint::Length(1),  // spacer
-        Constraint::Length(1),  // namespace tabs + search (combined row)
+        Constraint::Length(2), // header
+        Constraint::Length(1), // spacer
+        Constraint::Length(7), // quick toggles (5 content + 2 border)
+        Constraint::Length(1), // spacer
+        Constraint::Length(1), // namespace tabs + search (combined row)
         Constraint::Min(0),    // settings list
-        Constraint::Length(1),  // footer
+        Constraint::Length(1), // footer
     ])
     .split(area);
 
@@ -104,14 +102,28 @@ fn render_quick_toggles(app: &App, frame: &mut Frame, area: Rect) {
     let cols_r1 = Layout::horizontal(col_layout).split(rows[0]);
     let desc_r1 = Layout::horizontal(col_layout).split(rows[1]);
     for col_idx in 0..3 {
-        render_toggle_cell(app, frame, cols_r1[col_idx], desc_r1[col_idx], col_idx, is_focused);
+        render_toggle_cell(
+            app,
+            frame,
+            cols_r1[col_idx],
+            desc_r1[col_idx],
+            col_idx,
+            is_focused,
+        );
     }
 
     // Row 2: toggles 3-5
     let cols_r2 = Layout::horizontal(col_layout).split(rows[3]);
     let desc_r2 = Layout::horizontal(col_layout).split(rows[4]);
     for col_idx in 0..3 {
-        render_toggle_cell(app, frame, cols_r2[col_idx], desc_r2[col_idx], 3 + col_idx, is_focused);
+        render_toggle_cell(
+            app,
+            frame,
+            cols_r2[col_idx],
+            desc_r2[col_idx],
+            3 + col_idx,
+            is_focused,
+        );
     }
 }
 
@@ -159,7 +171,7 @@ fn render_toggle_cell(
 /// Namespace tabs + search on a single row.
 fn render_tabs_and_search(app: &App, frame: &mut Frame, area: Rect) {
     let cols = Layout::horizontal([
-        Constraint::Min(0),    // tabs
+        Constraint::Min(0),     // tabs
         Constraint::Length(30), // search
     ])
     .split(area);
@@ -167,9 +179,16 @@ fn render_tabs_and_search(app: &App, frame: &mut Frame, area: Rect) {
     // Tabs
     let mut tab_spans = Vec::new();
     tab_spans.push(Span::raw(" "));
-    for ns in &[SettingsNamespace::System, SettingsNamespace::Secure, SettingsNamespace::Global] {
+    for ns in &[
+        SettingsNamespace::System,
+        SettingsNamespace::Secure,
+        SettingsNamespace::Global,
+    ] {
         if app.settings.namespace == *ns {
-            tab_spans.push(Span::styled(format!("[{}]", ns.label()), Theme::accent_bold()));
+            tab_spans.push(Span::styled(
+                format!("[{}]", ns.label()),
+                Theme::accent_bold(),
+            ));
         } else {
             tab_spans.push(Span::styled(format!("[{}]", ns.label()), Theme::muted()));
         }
@@ -186,7 +205,7 @@ fn render_tabs_and_search(app: &App, frame: &mut Frame, area: Rect) {
             frame,
             cols[1],
             &app.settings.search_query,
-            app.settings.search_query.len(),
+            app.settings.search_query.chars().count(),
             "/",
             true,
         );
@@ -194,10 +213,7 @@ fn render_tabs_and_search(app: &App, frame: &mut Frame, area: Rect) {
         let display = if app.settings.search_query.is_empty() {
             Span::styled("/ search", Theme::muted())
         } else {
-            Span::styled(
-                format!("/{}", app.settings.search_query),
-                Theme::dim(),
-            )
+            Span::styled(format!("/{}", app.settings.search_query), Theme::dim())
         };
         frame.render_widget(
             Paragraph::new(Line::from(display)).style(Style::default().bg(Theme::BG)),
@@ -238,8 +254,7 @@ fn render_settings_list(app: &App, frame: &mut Frame, area: Rect) {
         } else {
             "No settings found"
         };
-        let hint = Paragraph::new(Span::styled(msg, Theme::muted()))
-            .alignment(Alignment::Center);
+        let hint = Paragraph::new(Span::styled(msg, Theme::muted())).alignment(Alignment::Center);
         let centered = Layout::vertical([
             Constraint::Fill(1),
             Constraint::Length(1),
@@ -253,7 +268,7 @@ fn render_settings_list(app: &App, frame: &mut Frame, area: Rect) {
     // Split: column header + list
     let list_chunks = Layout::vertical([
         Constraint::Length(1), // column header
-        Constraint::Min(0),   // list rows
+        Constraint::Min(0),    // list rows
     ])
     .split(inner);
 
@@ -263,9 +278,15 @@ fn render_settings_list(app: &App, frame: &mut Frame, area: Rect) {
 
     // Column header
     let header_line = Line::from(vec![
-        Span::styled(format!(" {:<width$}", "KEY", width = key_width), Theme::muted()),
+        Span::styled(
+            format!(" {:<width$}", "KEY", width = key_width),
+            Theme::muted(),
+        ),
         Span::styled("   ", Theme::muted()),
-        Span::styled(format!("{:<width$}", "VALUE", width = value_width), Theme::muted()),
+        Span::styled(
+            format!("{:<width$}", "VALUE", width = value_width),
+            Theme::muted(),
+        ),
     ]);
     frame.render_widget(
         Paragraph::new(header_line).style(Style::default().bg(Theme::BG)),
@@ -274,7 +295,10 @@ fn render_settings_list(app: &App, frame: &mut Frame, area: Rect) {
 
     // List rows
     let visible_height = list_chunks[1].height as usize;
-    let selected = app.settings.selected_index.min(filtered.len().saturating_sub(1));
+    let selected = app
+        .settings
+        .selected_index
+        .min(filtered.len().saturating_sub(1));
 
     // Compute effective scroll that keeps selection visible
     let mut scroll = app.settings.scroll_offset;
@@ -306,9 +330,15 @@ fn render_settings_list(app: &App, frame: &mut Frame, area: Rect) {
         };
 
         let mut spans = vec![
-            Span::styled(format!(" {:<width$}", key_display, width = key_width), key_style),
+            Span::styled(
+                format!(" {:<width$}", key_display, width = key_width),
+                key_style,
+            ),
             Span::styled(" = ", Theme::muted()),
-            Span::styled(format!("{:<width$}", val_display, width = value_width), Theme::dim()),
+            Span::styled(
+                format!("{:<width$}", val_display, width = value_width),
+                Theme::dim(),
+            ),
         ];
 
         if is_selected {
@@ -331,13 +361,17 @@ fn render_settings_list(app: &App, frame: &mut Frame, area: Rect) {
 
 /// Footer with keybinding hints.
 fn render_footer(frame: &mut Frame, area: Rect) {
-    render_keybinding_footer(frame, area, &[
-        ("n", "namespace"),
-        ("/", "search"),
-        ("Tab", "focus"),
-        ("Space", "toggle"),
-        ("e", "edit"),
-        ("d", "delete"),
-        ("r", "refresh"),
-    ]);
+    render_keybinding_footer(
+        frame,
+        area,
+        &[
+            ("n", "namespace"),
+            ("/", "search"),
+            ("Tab", "focus"),
+            ("Space", "toggle"),
+            ("e", "edit"),
+            ("d", "delete"),
+            ("r", "refresh"),
+        ],
+    );
 }

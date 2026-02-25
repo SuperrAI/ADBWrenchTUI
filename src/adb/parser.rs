@@ -1,5 +1,5 @@
-use crate::app::{PackageDetails, SettingEntry};
 use super::types::*;
+use crate::app::{PackageDetails, SettingEntry};
 
 /// Parse `/proc/meminfo` output to extract memory values.
 pub fn parse_meminfo(output: &str) -> (u64, u64) {
@@ -19,11 +19,7 @@ pub fn parse_meminfo(output: &str) -> (u64, u64) {
 }
 
 fn parse_kb_value(s: &str) -> u64 {
-    s.trim()
-        .trim_end_matches("kB")
-        .trim()
-        .parse()
-        .unwrap_or(0)
+    s.trim().trim_end_matches("kB").trim().parse().unwrap_or(0)
 }
 
 /// Parse `dumpsys battery` output.
@@ -82,10 +78,7 @@ pub fn parse_storage(output: &str) -> StorageInfo {
                 let total = parts[1].to_string();
                 let used = parts[2].to_string();
                 let available = parts[3].to_string();
-                let percent: f64 = parts[4]
-                    .trim_end_matches('%')
-                    .parse()
-                    .unwrap_or(0.0);
+                let percent: f64 = parts[4].trim_end_matches('%').parse().unwrap_or(0.0);
 
                 return StorageInfo {
                     total: format_storage_size(&total),
@@ -127,32 +120,28 @@ pub fn parse_logcat_line(line: &str) -> Option<LogEntry> {
         return None;
     }
 
-    // Try threadtime format
+    // Try threadtime format.
     // Example: "01-15 10:30:45.123  1234  5678 I ActivityManager: Start proc..."
-    let parts: Vec<&str> = line.splitn(6, char::is_whitespace).collect();
-    if parts.len() >= 6 {
-        let date_time = format!("{} {}", parts[0], parts[1]);
-        let _pid = parts[2].trim();
-        let _tid = parts[3].trim();
-        let level_str = parts[4].trim();
+    if let Some((date, rest)) = take_ws_token(line)
+        && let Some((time, rest)) = take_ws_token(rest)
+        && let Some((_pid, rest)) = take_ws_token(rest)
+        && let Some((_tid, rest)) = take_ws_token(rest)
+        && let Some((level_str, rest)) = take_ws_token(rest)
+        && let Some(level) = level_str.chars().next().and_then(LogLevel::from_char)
+    {
+        let payload = rest.trim_start();
+        let (tag, message) = if let Some((tag, msg)) = payload.split_once(':') {
+            (tag.trim().to_string(), msg.trim().to_string())
+        } else {
+            (String::new(), payload.to_string())
+        };
 
-        if let Some(level) = level_str.chars().next().and_then(LogLevel::from_char) {
-            let rest = parts[5].trim();
-            let (tag, message) = if let Some(colon_pos) = rest.find(':') {
-                let tag = rest[..colon_pos].trim().to_string();
-                let msg = rest[colon_pos + 1..].trim().to_string();
-                (tag, msg)
-            } else {
-                (String::new(), rest.to_string())
-            };
-
-            return Some(LogEntry {
-                timestamp: date_time,
-                level,
-                tag,
-                message,
-            });
-        }
+        return Some(LogEntry {
+            timestamp: format!("{date} {time}"),
+            level,
+            tag,
+            message,
+        });
     }
 
     // Fallback: treat entire line as a message
@@ -162,6 +151,18 @@ pub fn parse_logcat_line(line: &str) -> Option<LogEntry> {
         tag: String::new(),
         message: line.to_string(),
     })
+}
+
+fn take_ws_token(s: &str) -> Option<(&str, &str)> {
+    let s = s.trim_start();
+    if s.is_empty() {
+        return None;
+    }
+    let split_at = s
+        .char_indices()
+        .find_map(|(i, ch)| ch.is_whitespace().then_some(i))
+        .unwrap_or(s.len());
+    Some((&s[..split_at], &s[split_at..]))
 }
 
 /// Parse `ls -la` output into FileEntry entries.
@@ -179,7 +180,7 @@ pub fn parse_ls_output(output: &str, parent_path: &str) -> Vec<FileEntry> {
             continue;
         }
 
-        let parts: Vec<&str> = line.splitn(8, char::is_whitespace).collect();
+        let parts: Vec<&str> = line.split_whitespace().collect();
         if parts.len() < 8 {
             continue;
         }
@@ -191,20 +192,43 @@ pub fn parse_ls_output(output: &str, parent_path: &str) -> Vec<FileEntry> {
 
         let is_directory = permissions.starts_with('d');
         let is_symlink = permissions.starts_with('l');
-        let size: u64 = parts[4].parse().unwrap_or(0);
+        let (size, size_idx) = if let Some(v) = parts.get(4).and_then(|s| s.parse::<u64>().ok()) {
+            (v, 4usize)
+        } else if let Some(v) = parts.get(3).and_then(|s| s.parse::<u64>().ok()) {
+            (v, 3usize)
+        } else {
+            continue;
+        };
 
-        // Date is parts[5] + parts[6], name is parts[7]
-        let name_part = parts[7].trim();
+        // Android toybox often emits: "... SIZE YYYY-MM-DD HH:MM NAME"
+        // Some variants emit: "... SIZE MON DD HH:MM NAME"
+        let has_iso_date = parts
+            .get(size_idx + 1)
+            .map(|s| s.chars().all(|c| c.is_ascii_digit() || c == '-'))
+            .unwrap_or(false)
+            && parts
+                .get(size_idx + 2)
+                .map(|s| s.contains(':'))
+                .unwrap_or(false);
+        let name_start = if has_iso_date {
+            size_idx + 3
+        } else {
+            size_idx + 4
+        };
+        if name_start >= parts.len() {
+            continue;
+        }
+        let name_part = parts[name_start..].join(" ");
 
         // Handle symlinks: "name -> target"
         let name = if is_symlink {
             if let Some(arrow) = name_part.find(" -> ") {
-                name_part[..arrow].to_string()
+                name_part[..arrow].trim().to_string()
             } else {
-                name_part.to_string()
+                name_part.trim().to_string()
             }
         } else {
-            name_part.to_string()
+            name_part.trim().to_string()
         };
 
         // Skip . and ..
@@ -224,7 +248,9 @@ pub fn parse_ls_output(output: &str, parent_path: &str) -> Vec<FileEntry> {
 
     // Sort: directories first, then by name
     entries.sort_by(|a, b| {
-        b.is_directory.cmp(&a.is_directory).then(a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+        b.is_directory
+            .cmp(&a.is_directory)
+            .then(a.name.to_lowercase().cmp(&b.name.to_lowercase()))
     });
 
     entries
@@ -241,7 +267,9 @@ pub fn parse_package_list(output: &str) -> Vec<PackageInfo> {
             if let Some(eq_pos) = rest.rfind('=') {
                 let path = rest[..eq_pos].to_string();
                 let package_name = rest[eq_pos + 1..].to_string();
-                let is_system = path.starts_with("/system") || path.starts_with("/product") || path.starts_with("/vendor");
+                let is_system = path.starts_with("/system")
+                    || path.starts_with("/product")
+                    || path.starts_with("/vendor");
 
                 packages.push(PackageInfo {
                     package_name,
@@ -283,18 +311,27 @@ pub fn parse_package_details(output: &str, package_name: &str) -> PackageDetails
     let mut in_permissions = false;
     for line in output.lines() {
         let trimmed = line.trim();
-        if trimmed.starts_with("requested permissions:") || trimmed.starts_with("install permissions:") {
+        if trimmed.starts_with("requested permissions:")
+            || trimmed.starts_with("install permissions:")
+        {
             in_permissions = true;
             continue;
         }
         if in_permissions {
-            if trimmed.is_empty() || (!trimmed.starts_with("android.permission.") && !trimmed.starts_with("com.")) {
+            if trimmed.is_empty()
+                || (!trimmed.starts_with("android.permission.") && !trimmed.starts_with("com."))
+            {
                 if !trimmed.starts_with("android.permission.") && !trimmed.starts_with("com.") {
                     in_permissions = false;
                     continue;
                 }
             }
-            let perm = trimmed.split(':').next().unwrap_or(trimmed).trim().to_string();
+            let perm = trimmed
+                .split(':')
+                .next()
+                .unwrap_or(trimmed)
+                .trim()
+                .to_string();
             if !permissions.contains(&perm) {
                 permissions.push(perm);
             }
@@ -372,10 +409,12 @@ pub fn parse_top_output(output: &str) -> (f64, Vec<ProcessInfo>) {
                 let pid = parts[0].to_string();
                 let name = parts[11..].join(" "); // ARGS can contain spaces
 
-                let raw_cpu = parts.get(8)
+                let raw_cpu = parts
+                    .get(8)
                     .and_then(|s| s.parse::<f64>().ok())
                     .unwrap_or(0.0);
-                let mem_pct = parts.get(9)
+                let mem_pct = parts
+                    .get(9)
                     .and_then(|s| s.parse::<f64>().ok())
                     .unwrap_or(0.0);
 

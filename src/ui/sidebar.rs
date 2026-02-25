@@ -1,8 +1,8 @@
+use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
-use ratatui::Frame;
 
 use crate::adb::ConnectionState;
 use crate::app::{App, Focus, Page};
@@ -27,7 +27,7 @@ pub fn render(app: &App, frame: &mut Frame, area: Rect) {
     // Split sidebar: header | nav | device status | footer
     let chunks = Layout::vertical([
         Constraint::Length(3), // header
-        Constraint::Min(0),   // nav items
+        Constraint::Min(0),    // nav items
         Constraint::Length(4), // device status
         Constraint::Length(1), // footer
     ])
@@ -46,9 +46,7 @@ fn render_header(frame: &mut Frame, area: Rect) {
             Span::raw(" "),
             Span::styled("ADB Wrench", Theme::bold()),
         ]),
-        Line::from(vec![
-            Span::styled("   TUI Edition", Theme::muted()),
-        ]),
+        Line::from(vec![Span::styled("   TUI Edition", Theme::muted())]),
     ])
     .style(Style::default().bg(Theme::BG));
 
@@ -141,9 +139,10 @@ fn render_device_status(app: &App, frame: &mut Frame, area: Rect) {
 }
 
 fn render_footer(frame: &mut Frame, area: Rect) {
-    let footer = Paragraph::new(Line::from(vec![
-        Span::styled(format!(" v{} ", env!("CARGO_PKG_VERSION")), Theme::muted()),
-    ]))
+    let footer = Paragraph::new(Line::from(vec![Span::styled(
+        format!(" v{} ", env!("CARGO_PKG_VERSION")),
+        Theme::muted(),
+    )]))
     .style(Style::default().bg(Theme::BG));
 
     frame.render_widget(footer, area);

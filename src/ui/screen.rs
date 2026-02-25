@@ -1,8 +1,8 @@
+use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
-use ratatui::Frame;
 use ratatui_image::{Resize, StatefulImage, protocol::StatefulProtocol};
 
 use crate::app::{App, ScreenTab};
@@ -13,11 +13,11 @@ use crate::theme::Theme;
 pub fn render(app: &App, frame: &mut Frame, area: Rect) {
     let path_input_row = if app.screen.path_input_active { 1 } else { 0 };
     let chunks = Layout::vertical([
-        Constraint::Length(2),                      // header
-        Constraint::Length(path_input_row),          // path input (0 when hidden)
-        Constraint::Length(1),                       // tab bar
-        Constraint::Min(0),                         // content
-        Constraint::Length(1),                       // footer
+        Constraint::Length(2),              // header
+        Constraint::Length(path_input_row), // path input (0 when hidden)
+        Constraint::Length(1),              // tab bar
+        Constraint::Min(0),                 // content
+        Constraint::Length(1),              // footer
     ])
     .split(area);
 
@@ -33,10 +33,14 @@ pub fn render(app: &App, frame: &mut Frame, area: Rect) {
         return;
     }
 
-    render_tab_bar(frame, chunks[2], &[
-        ("SCREENSHOT", app.screen.active_tab == ScreenTab::Screenshot),
-        ("RECORD", app.screen.active_tab == ScreenTab::Record),
-    ]);
+    render_tab_bar(
+        frame,
+        chunks[2],
+        &[
+            ("SCREENSHOT", app.screen.active_tab == ScreenTab::Screenshot),
+            ("RECORD", app.screen.active_tab == ScreenTab::Record),
+        ],
+    );
 
     match app.screen.active_tab {
         ScreenTab::Screenshot => render_screenshot_tab(app, frame, chunks[3]),
@@ -75,7 +79,10 @@ fn render_header(app: &App, frame: &mut Frame, area: Rect) {
         spans.push(Span::styled(truncate_str(err, 40), Theme::error()));
     }
 
-    let dir_label = truncate_str(&app.config.output_dir, area.width.saturating_sub(10) as usize);
+    let dir_label = truncate_str(
+        &app.config.output_dir,
+        area.width.saturating_sub(10) as usize,
+    );
     let dir_line = Line::from(vec![
         Span::styled(" DIR: ", Theme::muted()),
         Span::styled(dir_label, Theme::dim()),
@@ -111,11 +118,8 @@ fn render_screenshot_tab(app: &App, frame: &mut Frame, area: Rect) {
     }
 
     // Two-column layout: preview (60%) + history list (40%)
-    let cols = Layout::horizontal([
-        Constraint::Percentage(60),
-        Constraint::Percentage(40),
-    ])
-    .split(area);
+    let cols =
+        Layout::horizontal([Constraint::Percentage(60), Constraint::Percentage(40)]).split(area);
 
     render_preview(app, frame, cols[0]);
     render_screenshot_history(app, frame, cols[1]);
@@ -235,7 +239,14 @@ fn render_screenshot_history(app: &App, frame: &mut Frame, area: Rect) {
     };
 
     let mut lines: Vec<Line> = Vec::with_capacity(visible_height);
-    for (i, cap) in app.screen.captures.iter().enumerate().skip(scroll_offset).take(visible_height) {
+    for (i, cap) in app
+        .screen
+        .captures
+        .iter()
+        .enumerate()
+        .skip(scroll_offset)
+        .take(visible_height)
+    {
         let is_selected = i == app.screen.capture_selected;
         let row_style = if is_selected {
             Theme::highlight()
@@ -249,10 +260,21 @@ fn render_screenshot_history(app: &App, frame: &mut Frame, area: Rect) {
 
         lines.push(
             Line::from(vec![
-                Span::styled(indicator, if is_selected { Theme::accent() } else { Style::default() }),
+                Span::styled(
+                    indicator,
+                    if is_selected {
+                        Theme::accent()
+                    } else {
+                        Style::default()
+                    },
+                ),
                 Span::styled(
                     truncate_str(&cap.filename, name_max),
-                    if is_selected { Theme::accent_bold() } else { Theme::text() },
+                    if is_selected {
+                        Theme::accent_bold()
+                    } else {
+                        Theme::text()
+                    },
                 ),
             ])
             .style(row_style),
@@ -288,7 +310,7 @@ fn render_record_tab(app: &App, frame: &mut Frame, area: Rect) {
         Constraint::Length(1), // duration selector
         Constraint::Length(1), // spacer
         Constraint::Length(3), // action button + progress
-        Constraint::Min(0),   // history
+        Constraint::Min(0),    // history
     ])
     .split(area);
 
@@ -303,7 +325,10 @@ fn render_record_tab(app: &App, frame: &mut Frame, area: Rect) {
     for d in &durations {
         let is_active = app.screen.record_duration == *d;
         if is_active {
-            dur_spans.push(Span::styled(format!("[{}]", d.label()), Theme::accent_bold()));
+            dur_spans.push(Span::styled(
+                format!("[{}]", d.label()),
+                Theme::accent_bold(),
+            ));
         } else {
             dur_spans.push(Span::styled(format!("[{}]", d.label()), Theme::muted()));
         }
@@ -364,11 +389,8 @@ fn render_recording_history(app: &App, frame: &mut Frame, area: Rect) {
     frame.render_widget(block, area);
 
     if app.screen.recordings.is_empty() {
-        let hint = Paragraph::new(Span::styled(
-            "No recordings yet",
-            Theme::muted(),
-        ))
-        .alignment(Alignment::Center);
+        let hint = Paragraph::new(Span::styled("No recordings yet", Theme::muted()))
+            .alignment(Alignment::Center);
         let centered = Layout::vertical([
             Constraint::Fill(1),
             Constraint::Length(1),
@@ -381,10 +403,26 @@ fn render_recording_history(app: &App, frame: &mut Frame, area: Rect) {
 
     let visible_height = inner.height as usize;
     let available_width = inner.width as usize;
+    let selected = app
+        .screen
+        .recording_selected
+        .min(app.screen.recordings.len().saturating_sub(1));
+    let scroll = if selected >= visible_height {
+        selected - visible_height + 1
+    } else {
+        0
+    };
 
     let mut lines: Vec<Line> = Vec::with_capacity(visible_height);
-    for (i, rec) in app.screen.recordings.iter().enumerate().take(visible_height) {
-        let is_selected = i == app.screen.recording_selected;
+    for (i, rec) in app
+        .screen
+        .recordings
+        .iter()
+        .enumerate()
+        .skip(scroll)
+        .take(visible_height)
+    {
+        let is_selected = i == selected;
         let row_style = if is_selected {
             Theme::highlight()
         } else {
@@ -397,7 +435,11 @@ fn render_recording_history(app: &App, frame: &mut Frame, area: Rect) {
                 Span::styled(" ", Style::default()),
                 Span::styled(
                     truncate_str(&rec.filename, name_max),
-                    if is_selected { Theme::accent_bold() } else { Theme::text() },
+                    if is_selected {
+                        Theme::accent_bold()
+                    } else {
+                        Theme::text()
+                    },
                 ),
                 Span::styled(format!("  {}s", rec.duration_secs), Theme::dim()),
                 Span::styled("  ", Style::default()),
@@ -422,31 +464,36 @@ fn render_recording_history(app: &App, frame: &mut Frame, area: Rect) {
 /// Footer with keybinding hints.
 fn render_footer(app: &App, frame: &mut Frame, area: Rect) {
     if app.screen.path_input_active {
-        render_keybinding_footer(frame, area, &[
-            ("Enter", "save"),
-            ("Esc", "cancel"),
-        ]);
+        render_keybinding_footer(frame, area, &[("Enter", "save"), ("Esc", "cancel")]);
         return;
     }
     match app.screen.active_tab {
         ScreenTab::Screenshot => {
-            render_keybinding_footer(frame, area, &[
-                ("1/2", "tab"),
-                ("c", "capture"),
-                ("j/k", "navigate"),
-                ("d", "delete"),
-                ("o", "open"),
-                ("p", "path"),
-            ]);
+            render_keybinding_footer(
+                frame,
+                area,
+                &[
+                    ("1/2", "tab"),
+                    ("c", "capture"),
+                    ("j/k", "navigate"),
+                    ("d", "delete"),
+                    ("o", "open"),
+                    ("p", "path"),
+                ],
+            );
         }
         ScreenTab::Record => {
-            render_keybinding_footer(frame, area, &[
-                ("1/2", "tab"),
-                ("c", "record"),
-                ("d", "duration"),
-                ("j/k", "navigate"),
-                ("p", "path"),
-            ]);
+            render_keybinding_footer(
+                frame,
+                area,
+                &[
+                    ("1/2", "tab"),
+                    ("c", "record"),
+                    ("d", "duration"),
+                    ("j/k", "navigate"),
+                    ("p", "path"),
+                ],
+            );
         }
     }
 }

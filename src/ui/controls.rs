@@ -1,8 +1,8 @@
+use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
-use ratatui::Frame;
 
 use crate::app::App;
 use crate::components::{render_gauge, render_keybinding_footer, render_text_input};
@@ -10,7 +10,9 @@ use crate::theme::Theme;
 
 /// Items within each section.
 const POWER_ITEMS: [&str; 3] = ["Reboot", "Recovery", "Bootloader"];
-const HARDWARE_KEYS: [&str; 8] = ["HOME", "BACK", "MENU", "RECENT", "PLAY", "PREV", "NEXT", "CAM"];
+const HARDWARE_KEYS: [&str; 8] = [
+    "HOME", "BACK", "MENU", "RECENT", "PLAY", "PREV", "NEXT", "CAM",
+];
 
 /// Render the Controls page.
 pub fn render(app: &App, frame: &mut Frame, area: Rect) {
@@ -21,13 +23,13 @@ pub fn render(app: &App, frame: &mut Frame, area: Rect) {
     if has_result || has_loading {
         constraints.push(Constraint::Length(1)); // status bar
     }
-    constraints.push(Constraint::Length(1));  // spacer
-    constraints.push(Constraint::Length(5));  // row 1: Power | Screen | Connectivity
-    constraints.push(Constraint::Length(1));  // spacer
-    constraints.push(Constraint::Length(5));  // row 2: Audio & Display (full width)
-    constraints.push(Constraint::Length(1));  // spacer
-    constraints.push(Constraint::Length(8));  // row 3: Text Input | Hardware Keys
-    constraints.push(Constraint::Min(0));    // fill
+    constraints.push(Constraint::Length(1)); // spacer
+    constraints.push(Constraint::Length(5)); // row 1: Power | Screen | Connectivity
+    constraints.push(Constraint::Length(1)); // spacer
+    constraints.push(Constraint::Length(5)); // row 2: Audio & Display (full width)
+    constraints.push(Constraint::Length(1)); // spacer
+    constraints.push(Constraint::Length(8)); // row 3: Text Input | Hardware Keys
+    constraints.push(Constraint::Min(0)); // fill
     constraints.push(Constraint::Length(1)); // footer
 
     let chunks = Layout::vertical(constraints).split(area);
@@ -86,11 +88,8 @@ pub fn render(app: &App, frame: &mut Frame, area: Rect) {
     render_audio_display_panel(app, frame, padded_row2);
 
     // Render row 3
-    let row3_cols = Layout::horizontal([
-        Constraint::Percentage(50),
-        Constraint::Percentage(50),
-    ])
-    .split(padded_row3);
+    let row3_cols = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(padded_row3);
 
     render_text_input_card(app, frame, row3_cols[0]);
     render_hardware_keys_card(app, frame, row3_cols[1]);
@@ -215,7 +214,11 @@ fn render_screen_card(app: &App, frame: &mut Frame, area: Rect) {
     let lines = vec![
         item_line("Toggle", focused && app.controls.focus_item == 0),
         item_line("Unlock", focused && app.controls.focus_item == 1),
-        toggle_line("Stay Awake", app.controls.stay_awake, focused && app.controls.focus_item == 2),
+        toggle_line(
+            "Stay Awake",
+            app.controls.stay_awake,
+            focused && app.controls.focus_item == 2,
+        ),
     ];
 
     frame.render_widget(Paragraph::new(lines), inner);
@@ -229,9 +232,21 @@ fn render_connectivity_card(app: &App, frame: &mut Frame, area: Rect) {
     frame.render_widget(block, area);
 
     let lines = vec![
-        toggle_line("WiFi", app.controls.wifi_enabled, focused && app.controls.focus_item == 0),
-        toggle_line("Bluetooth", app.controls.bluetooth_enabled, focused && app.controls.focus_item == 1),
-        toggle_line("Airplane", app.controls.airplane_mode, focused && app.controls.focus_item == 2),
+        toggle_line(
+            "WiFi",
+            app.controls.wifi_enabled,
+            focused && app.controls.focus_item == 0,
+        ),
+        toggle_line(
+            "Bluetooth",
+            app.controls.bluetooth_enabled,
+            focused && app.controls.focus_item == 1,
+        ),
+        toggle_line(
+            "Airplane",
+            app.controls.airplane_mode,
+            focused && app.controls.focus_item == 2,
+        ),
     ];
 
     frame.render_widget(Paragraph::new(lines), inner);
@@ -282,7 +297,11 @@ fn render_audio_row(
     is_selected: bool,
 ) {
     let prefix = if is_selected { "\u{25b8} " } else { "  " };
-    let label_style = if is_selected { Theme::accent_bold() } else { Theme::muted() };
+    let label_style = if is_selected {
+        Theme::accent_bold()
+    } else {
+        Theme::muted()
+    };
 
     let cols = Layout::horizontal([
         Constraint::Length(2),                  // prefix
@@ -294,22 +313,13 @@ fn render_audio_row(
     ])
     .split(area);
 
-    frame.render_widget(
-        Paragraph::new(Span::styled(prefix, label_style)),
-        cols[0],
-    );
+    frame.render_widget(Paragraph::new(Span::styled(prefix, label_style)), cols[0]);
 
-    frame.render_widget(
-        Paragraph::new(Span::styled(label, label_style)),
-        cols[1],
-    );
+    frame.render_widget(Paragraph::new(Span::styled(label, label_style)), cols[1]);
 
     render_gauge(frame, cols[2], ratio, "", Theme::ORANGE);
 
-    frame.render_widget(
-        Paragraph::new(Span::styled(value, Theme::dim())),
-        cols[4],
-    );
+    frame.render_widget(Paragraph::new(Span::styled(value, Theme::dim())), cols[4]);
 }
 
 /// Section 4: Text Input card.
@@ -325,7 +335,7 @@ fn render_text_input_card(app: &App, frame: &mut Frame, area: Rect) {
         Constraint::Length(1), // text input
         Constraint::Length(1), // spacer
         Constraint::Length(1), // send button
-        Constraint::Min(0),   // fill
+        Constraint::Min(0),    // fill
     ])
     .split(inner);
 
@@ -336,10 +346,7 @@ fn render_text_input_card(app: &App, frame: &mut Frame, area: Rect) {
         Theme::muted()
     };
     frame.render_widget(
-        Paragraph::new(Span::styled(
-            " Type text to send to device",
-            hint_style,
-        )),
+        Paragraph::new(Span::styled(" Type text to send to device", hint_style)),
         rows[0],
     );
 
@@ -389,11 +396,8 @@ fn render_hardware_keys_card(app: &App, frame: &mut Frame, area: Rect) {
     .split(inner);
 
     for row_idx in 0..4 {
-        let cols = Layout::horizontal([
-            Constraint::Percentage(50),
-            Constraint::Percentage(50),
-        ])
-        .split(rows[row_idx]);
+        let cols = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .split(rows[row_idx]);
 
         for col_idx in 0..2 {
             let item_idx = row_idx * 2 + col_idx;
@@ -408,12 +412,16 @@ fn render_hardware_keys_card(app: &App, frame: &mut Frame, area: Rect) {
 
 /// Render the footer with keybinding hints.
 fn render_footer(frame: &mut Frame, area: Rect) {
-    render_keybinding_footer(frame, area, &[
-        ("Tab", "section"),
-        ("j/k", "item"),
-        ("h/l", "adjust"),
-        ("Enter", "activate"),
-        ("m", "mute"),
-        ("i", "text"),
-    ]);
+    render_keybinding_footer(
+        frame,
+        area,
+        &[
+            ("Tab", "section"),
+            ("j/k", "item"),
+            ("h/l", "adjust"),
+            ("Enter", "activate"),
+            ("m", "mute"),
+            ("i", "text"),
+        ],
+    );
 }

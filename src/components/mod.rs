@@ -1,8 +1,8 @@
+use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Gauge, Paragraph, Wrap};
-use ratatui::Frame;
 
 use crate::theme::Theme;
 
@@ -86,29 +86,20 @@ pub fn render_text_input(
     let cursor_char = if is_focused { "\u{2588}" } else { "" };
 
     // Calculate visible window of text
-    let prompt_len = prompt.len();
+    let prompt_len = prompt.chars().count();
     let available_width = area.width.saturating_sub(prompt_len as u16 + 1) as usize;
-
-    let (visible_text, cursor_in_view) = if cursor_pos > available_width {
-        let start = cursor_pos - available_width;
-        (&value[start..], available_width)
-    } else {
-        (value, cursor_pos)
-    };
-
-    let visible_text = if visible_text.len() > available_width {
-        &visible_text[..available_width]
-    } else {
-        visible_text
-    };
+    let chars: Vec<char> = value.chars().collect();
+    let cursor_pos = cursor_pos.min(chars.len());
+    let start = cursor_pos.saturating_sub(available_width);
+    let end = (start + available_width).min(chars.len());
+    let cursor_in_view = cursor_pos
+        .saturating_sub(start)
+        .min(end.saturating_sub(start));
+    let visible_chars = &chars[start..end];
 
     // Build text with cursor
-    let before_cursor = &visible_text[..cursor_in_view.min(visible_text.len())];
-    let after_cursor = if cursor_in_view < visible_text.len() {
-        &visible_text[cursor_in_view..]
-    } else {
-        ""
-    };
+    let before_cursor: String = visible_chars[..cursor_in_view].iter().collect();
+    let after_cursor: String = visible_chars[cursor_in_view..].iter().collect();
 
     let spans = vec![
         Span::styled(prompt, Theme::accent()),
@@ -257,9 +248,7 @@ pub fn render_confirm_modal(
         Theme::muted()
     };
     let confirm_style = if confirm_focused {
-        Style::default()
-            .fg(Theme::RED)
-            .add_modifier(Modifier::BOLD)
+        Style::default().fg(Theme::RED).add_modifier(Modifier::BOLD)
     } else {
         Theme::muted()
     };
@@ -336,9 +325,14 @@ pub fn render_input_modal(
 
 /// Truncate a string with ellipsis if it exceeds max length.
 pub fn truncate_str(s: &str, max: usize) -> String {
-    if s.len() <= max {
+    if max == 0 {
+        return String::new();
+    }
+    if s.chars().count() <= max {
         s.to_string()
     } else {
-        format!("{}…", &s[..max - 1])
+        let mut out: String = s.chars().take(max - 1).collect();
+        out.push('…');
+        out
     }
 }

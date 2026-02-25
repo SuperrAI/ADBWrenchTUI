@@ -42,8 +42,8 @@ async fn main() -> Result<()> {
         tracing::warn!("Failed to detect devices: {e}");
     }
 
-    // Event handler (tick every 250ms)
-    let mut events = EventHandler::new(Duration::from_millis(250));
+    // Event handler (tick every 100ms)
+    let mut events = EventHandler::new(Duration::from_millis(100));
 
     // Main loop
     while app.running {
@@ -62,10 +62,6 @@ async fn main() -> Result<()> {
                         app.dispatch_action(action).await;
                     }
                 }
-                // Check for pending action from modal confirmation
-                if let Some(action) = app.pending_action.take() {
-                    app.dispatch_action(action).await;
-                }
             }
             Event::Mouse(mouse) => {
                 app.handle_mouse(mouse);
@@ -73,34 +69,10 @@ async fn main() -> Result<()> {
             Event::Resize(_w, _h) => {
                 // Terminal auto-handles resize
             }
-            Event::Tick => {
-                // Dashboard auto-refresh
-                if app.dashboard_needs_refresh() {
-                    app.refresh_dashboard().await;
-                }
-
-                // Performance polling
-                if app.perf_needs_collect() {
-                    app.collect_perf_data().await;
-                }
-
-                // Drain streaming channels
-                app.drain_shell_output();
-                app.drain_logcat_lines();
-                app.drain_bugreport_progress();
-
-                // Update recording elapsed
-                app.update_screen_recording();
-
-                // Clear stale result messages
-                app.clear_stale_results();
-
-                // Dispatch any pending actions (e.g. auto-stop recording)
-                if let Some(action) = app.pending_action.take() {
-                    app.dispatch_action(action).await;
-                }
-            }
+            Event::Tick => {}
         }
+
+        app.process_background().await;
     }
 
     // Restore terminal

@@ -1,5 +1,7 @@
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
 use anyhow::Result;
@@ -8,10 +10,10 @@ use ratatui_image::picker::Picker;
 use ratatui_image::protocol::StatefulProtocol;
 use tokio::sync::mpsc;
 
-use crate::adb::types::*;
 use crate::adb::DeviceManager;
-use crate::config::AppConfig;
 use crate::adb::parser;
+use crate::adb::types::*;
+use crate::config::AppConfig;
 
 // ── Enums for page-specific options ──────────────────────────────
 
@@ -129,6 +131,16 @@ impl LogcatBuffer {
 
 /// Performance data refresh interval in seconds.
 const PERF_REFRESH_SECS: u64 = 2;
+/// Device scan interval in seconds (for reconnect/hot-plug detection).
+const DEVICE_SCAN_SECS: u64 = 3;
+/// Max number of logcat lines kept in memory.
+const LOGCAT_MAX_LINES: usize = 2000;
+/// Max number of newest logcat lines parsed per drain cycle.
+const LOGCAT_PARSE_BATCH: usize = 1000;
+/// Bounded channel capacity for incoming logcat lines.
+const LOGCAT_CHANNEL_CAPACITY: usize = 4096;
+/// Max raw logcat lines to receive from channel per background cycle.
+const LOGCAT_RECV_LIMIT: usize = 4096;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RecordDuration {
@@ -302,6 +314,7 @@ pub struct ShellState {
     pub scroll_offset: usize,
     pub timeout: ShellTimeout,
     pub stream_rx: Option<mpsc::UnboundedReceiver<String>>,
+    pub stream_child: Option<tokio::process::Child>,
 }
 
 /// Logcat focus area.
@@ -351,7 +364,11 @@ impl LogcatControl {
     }
 
     pub fn prev_idx(idx: usize) -> usize {
-        if idx == 0 { Self::ALL.len() - 1 } else { idx - 1 }
+        if idx == 0 {
+            Self::ALL.len() - 1
+        } else {
+            idx - 1
+        }
     }
 }
 
@@ -368,7 +385,10 @@ pub struct LogcatState {
     pub scroll_offset: usize,
     pub search_active: bool,
     pub tag_active: bool,
-    pub stream_rx: Option<mpsc::UnboundedReceiver<String>>,
+    pub stream_rx: Option<mpsc::Receiver<String>>,
+    pub stream_child: Option<tokio::process::Child>,
+    pub dropped_counter: Option<Arc<AtomicUsize>>,
+    pub dropped_lines: usize,
     pub focus: LogcatFocus,
     pub control_index: usize,
 }
@@ -412,6 +432,7 @@ pub struct FilesState {
     pub selected_files: HashSet<String>,
     pub loading: bool,
     pub error: Option<String>,
+    pub result: Option<(bool, String, Instant)>,
 }
 
 /// Apps page panel focus.
@@ -489,12 +510,54 @@ pub struct QuickToggle {
 }
 
 pub const QUICK_TOGGLES: &[QuickToggle] = &[
-    QuickToggle { name: "WIRELESS ADB", desc: "Debug over network", namespace: "global", key: "adb_wifi_enabled", enable_value: "1", disable_value: "0" },
-    QuickToggle { name: "SHOW TOUCHES", desc: "Visual feedback", namespace: "system", key: "show_touches", enable_value: "1", disable_value: "0" },
-    QuickToggle { name: "POINTER LOC", desc: "Coordinate overlay", namespace: "system", key: "pointer_location", enable_value: "1", disable_value: "0" },
-    QuickToggle { name: "STAY AWAKE", desc: "Screen on while charging", namespace: "global", key: "stay_on_while_plugged_in", enable_value: "3", disable_value: "0" },
-    QuickToggle { name: "GPU DEBUG", desc: "Force GPU debug layers", namespace: "global", key: "enable_gpu_debug_layers", enable_value: "1", disable_value: "0" },
-    QuickToggle { name: "ANIM SCALE", desc: "Window animation scale", namespace: "global", key: "animator_duration_scale", enable_value: "1.0", disable_value: "0" },
+    QuickToggle {
+        name: "WIRELESS ADB",
+        desc: "Debug over network",
+        namespace: "global",
+        key: "adb_wifi_enabled",
+        enable_value: "1",
+        disable_value: "0",
+    },
+    QuickToggle {
+        name: "SHOW TOUCHES",
+        desc: "Visual feedback",
+        namespace: "system",
+        key: "show_touches",
+        enable_value: "1",
+        disable_value: "0",
+    },
+    QuickToggle {
+        name: "POINTER LOC",
+        desc: "Coordinate overlay",
+        namespace: "system",
+        key: "pointer_location",
+        enable_value: "1",
+        disable_value: "0",
+    },
+    QuickToggle {
+        name: "STAY AWAKE",
+        desc: "Screen on while charging",
+        namespace: "global",
+        key: "stay_on_while_plugged_in",
+        enable_value: "3",
+        disable_value: "0",
+    },
+    QuickToggle {
+        name: "GPU DEBUG",
+        desc: "Force GPU debug layers",
+        namespace: "global",
+        key: "enable_gpu_debug_layers",
+        enable_value: "1",
+        disable_value: "0",
+    },
+    QuickToggle {
+        name: "ANIM SCALE",
+        desc: "Window animation scale",
+        namespace: "global",
+        key: "animator_duration_scale",
+        enable_value: "1.0",
+        disable_value: "0",
+    },
 ];
 
 /// Bugreport history entry.
@@ -517,6 +580,7 @@ pub struct BugreportState {
     pub history: Vec<BugreportEntry>,
     pub selected_index: usize,
     pub stream_rx: Option<mpsc::UnboundedReceiver<String>>,
+    pub stream_child: Option<tokio::process::Child>,
     pub raw_output: String,
 }
 
@@ -555,6 +619,7 @@ pub struct ScreenState {
     pub recordings: Vec<RecordingEntry>,
     pub recording_selected: usize,
     pub stream_rx: Option<mpsc::UnboundedReceiver<String>>,
+    pub stream_child: Option<tokio::process::Child>,
     pub error: Option<String>,
     /// Image protocol picker for terminal image rendering.
     pub picker: Option<Picker>,
@@ -735,10 +800,36 @@ pub struct App {
     pub settings: SettingsState,
     pub bugreport: BugreportState,
     pub screen: ScreenState,
-    // Stream child processes (for cleanup)
-    pub stream_children: Vec<tokio::process::Child>,
     // Pending action from modal confirmations
     pub pending_action: Option<AppAction>,
+    // Last time we scanned adb devices for hot-plug/reconnect handling
+    pub last_device_scan: Option<Instant>,
+}
+
+fn char_count(s: &str) -> usize {
+    s.chars().count()
+}
+
+fn byte_idx_from_char_idx(s: &str, char_idx: usize) -> usize {
+    s.char_indices()
+        .nth(char_idx)
+        .map(|(i, _)| i)
+        .unwrap_or_else(|| s.len())
+}
+
+fn insert_char_at(s: &mut String, char_idx: usize, c: char) {
+    let byte_idx = byte_idx_from_char_idx(s, char_idx);
+    s.insert(byte_idx, c);
+}
+
+fn remove_char_before(s: &mut String, char_idx: usize) -> usize {
+    if char_idx == 0 {
+        return 0;
+    }
+    let start = byte_idx_from_char_idx(s, char_idx - 1);
+    let end = byte_idx_from_char_idx(s, char_idx);
+    s.replace_range(start..end, "");
+    char_idx - 1
 }
 
 impl App {
@@ -772,6 +863,7 @@ impl App {
                 scroll_offset: 0,
                 timeout: ShellTimeout::Sec10,
                 stream_rx: None,
+                stream_child: None,
             },
             logcat: LogcatState {
                 logs: Vec::new(),
@@ -786,6 +878,9 @@ impl App {
                 search_active: false,
                 tag_active: false,
                 stream_rx: None,
+                stream_child: None,
+                dropped_counter: None,
+                dropped_lines: 0,
                 focus: LogcatFocus::Controls,
                 control_index: 0,
             },
@@ -822,6 +917,7 @@ impl App {
                 selected_files: HashSet::new(),
                 loading: false,
                 error: None,
+                result: None,
             },
             apps: AppsState {
                 packages: Vec::new(),
@@ -857,6 +953,7 @@ impl App {
                 history: Vec::new(),
                 selected_index: 0,
                 stream_rx: None,
+                stream_child: None,
                 raw_output: String::new(),
             },
             screen: ScreenState {
@@ -871,6 +968,7 @@ impl App {
                 recordings: Vec::new(),
                 recording_selected: 0,
                 stream_rx: None,
+                stream_child: None,
                 error: None,
                 picker,
                 preview_state: RefCell::new(None),
@@ -879,8 +977,8 @@ impl App {
                 path_input: String::new(),
                 status: None,
             },
-            stream_children: Vec::new(),
             pending_action: None,
+            last_device_scan: None,
         }
     }
 
@@ -905,6 +1003,9 @@ impl App {
                     Page::Logcat if self.logcat.is_streaming => {
                         return true; // handled by page handler
                     }
+                    Page::Bugreport if self.bugreport.is_generating => {
+                        return true; // handled by page handler
+                    }
                     _ => {}
                 }
             }
@@ -919,7 +1020,9 @@ impl App {
         }
 
         // Tab / Shift+Tab navigation
-        if (key.code == KeyCode::Tab || key.code == KeyCode::BackTab) && !self.is_text_input_active() {
+        if (key.code == KeyCode::Tab || key.code == KeyCode::BackTab)
+            && !self.is_text_input_active()
+        {
             if self.focus == Focus::Sidebar {
                 self.focus = Focus::Content;
                 return true;
@@ -1032,8 +1135,10 @@ impl App {
                 if self.dashboard.focus_section == DashboardSection::Processes {
                     let max = self.performance.processes.len().saturating_sub(1);
                     if delta < 0 {
-                        self.dashboard.focus_item =
-                            self.dashboard.focus_item.saturating_sub(delta.unsigned_abs() as usize);
+                        self.dashboard.focus_item = self
+                            .dashboard
+                            .focus_item
+                            .saturating_sub(delta.unsigned_abs() as usize);
                     } else {
                         self.dashboard.focus_item =
                             (self.dashboard.focus_item + delta as usize).min(max);
@@ -1042,17 +1147,25 @@ impl App {
             }
             Page::Logcat => {
                 if delta < 0 {
-                    self.logcat.scroll_offset =
-                        self.logcat.scroll_offset.saturating_sub(delta.unsigned_abs() as usize);
+                    self.logcat.scroll_offset = self
+                        .logcat
+                        .scroll_offset
+                        .saturating_add(delta.unsigned_abs() as usize);
+                    self.logcat.auto_scroll = false;
                 } else {
-                    self.logcat.scroll_offset += delta as usize;
+                    self.logcat.scroll_offset =
+                        self.logcat.scroll_offset.saturating_sub(delta as usize);
+                    if self.logcat.scroll_offset == 0 {
+                        self.logcat.auto_scroll = true;
+                    }
                 }
-                self.logcat.auto_scroll = false;
             }
             Page::Shell => {
                 if delta < 0 {
-                    self.shell.scroll_offset =
-                        self.shell.scroll_offset.saturating_add(delta.unsigned_abs() as usize);
+                    self.shell.scroll_offset = self
+                        .shell
+                        .scroll_offset
+                        .saturating_add(delta.unsigned_abs() as usize);
                 } else {
                     self.shell.scroll_offset =
                         self.shell.scroll_offset.saturating_sub(delta as usize);
@@ -1060,48 +1173,74 @@ impl App {
             }
             Page::Files => {
                 if delta < 0 {
-                    self.files.selected_index =
-                        self.files.selected_index.saturating_sub(delta.unsigned_abs() as usize);
+                    self.files.selected_index = self
+                        .files
+                        .selected_index
+                        .saturating_sub(delta.unsigned_abs() as usize);
                 } else {
                     let max = self.files.entries.len().saturating_sub(1);
-                    self.files.selected_index =
-                        (self.files.selected_index + delta as usize).min(max);
+                    self.files.selected_index = self
+                        .files
+                        .selected_index
+                        .saturating_add(delta as usize)
+                        .min(max);
                 }
             }
             Page::Apps => {
                 if delta < 0 {
-                    self.apps.selected_index =
-                        self.apps.selected_index.saturating_sub(delta.unsigned_abs() as usize);
-                    self.apps.scroll_offset =
-                        self.apps.scroll_offset.saturating_sub(delta.unsigned_abs() as usize);
+                    self.apps.selected_index = self
+                        .apps
+                        .selected_index
+                        .saturating_sub(delta.unsigned_abs() as usize);
+                    self.apps.scroll_offset = self
+                        .apps
+                        .scroll_offset
+                        .saturating_sub(delta.unsigned_abs() as usize);
                 } else {
-                    let max = self.apps.packages.len().saturating_sub(1);
-                    self.apps.selected_index =
-                        (self.apps.selected_index + delta as usize).min(max);
-                    self.apps.scroll_offset += delta as usize;
+                    let max = self.filtered_packages().len().saturating_sub(1);
+                    self.apps.selected_index = self
+                        .apps
+                        .selected_index
+                        .saturating_add(delta as usize)
+                        .min(max);
+                    self.apps.scroll_offset =
+                        self.apps.scroll_offset.saturating_add(delta as usize);
                 }
             }
             Page::Settings => {
                 if delta < 0 {
-                    self.settings.selected_index =
-                        self.settings.selected_index.saturating_sub(delta.unsigned_abs() as usize);
-                    self.settings.scroll_offset =
-                        self.settings.scroll_offset.saturating_sub(delta.unsigned_abs() as usize);
+                    self.settings.selected_index = self
+                        .settings
+                        .selected_index
+                        .saturating_sub(delta.unsigned_abs() as usize);
+                    self.settings.scroll_offset = self
+                        .settings
+                        .scroll_offset
+                        .saturating_sub(delta.unsigned_abs() as usize);
                 } else {
                     let max = self.filtered_settings().len().saturating_sub(1);
-                    self.settings.selected_index =
-                        (self.settings.selected_index + delta as usize).min(max);
-                    self.settings.scroll_offset += delta as usize;
+                    self.settings.selected_index = self
+                        .settings
+                        .selected_index
+                        .saturating_add(delta as usize)
+                        .min(max);
+                    self.settings.scroll_offset =
+                        self.settings.scroll_offset.saturating_add(delta as usize);
                 }
             }
             Page::Bugreport => {
                 if delta < 0 {
-                    self.bugreport.selected_index =
-                        self.bugreport.selected_index.saturating_sub(delta.unsigned_abs() as usize);
+                    self.bugreport.selected_index = self
+                        .bugreport
+                        .selected_index
+                        .saturating_sub(delta.unsigned_abs() as usize);
                 } else {
                     let max = self.bugreport.history.len().saturating_sub(1);
-                    self.bugreport.selected_index =
-                        (self.bugreport.selected_index + delta as usize).min(max);
+                    self.bugreport.selected_index = self
+                        .bugreport
+                        .selected_index
+                        .saturating_add(delta as usize)
+                        .min(max);
                 }
             }
             _ => {}
@@ -1145,15 +1284,12 @@ impl App {
                 ..
             } => match key.code {
                 KeyCode::Char(c) => {
-                    value.insert(*cursor_pos, c);
+                    insert_char_at(value, *cursor_pos, c);
                     *cursor_pos += 1;
                     true
                 }
                 KeyCode::Backspace => {
-                    if *cursor_pos > 0 {
-                        *cursor_pos -= 1;
-                        value.remove(*cursor_pos);
-                    }
+                    *cursor_pos = remove_char_before(value, *cursor_pos);
                     true
                 }
                 KeyCode::Left => {
@@ -1163,7 +1299,7 @@ impl App {
                     true
                 }
                 KeyCode::Right => {
-                    if *cursor_pos < value.len() {
+                    if *cursor_pos < char_count(value) {
                         *cursor_pos += 1;
                     }
                     true
@@ -1290,8 +1426,7 @@ impl App {
             KeyCode::Char('c') => {
                 if let Some(value) = self.get_dashboard_focused_value() {
                     self.copy_to_clipboard(&value);
-                    self.dashboard.copied_feedback =
-                        Some((value, Instant::now()));
+                    self.dashboard.copied_feedback = Some((value, Instant::now()));
                 }
                 AppAction::None
             }
@@ -1433,7 +1568,7 @@ impl App {
                 };
                 self.shell.history_index = Some(idx);
                 self.shell.input = self.shell.history[idx].clone();
-                self.shell.cursor_pos = self.shell.input.len();
+                self.shell.cursor_pos = char_count(&self.shell.input);
                 AppAction::None
             }
             KeyCode::Down => {
@@ -1445,7 +1580,7 @@ impl App {
                         self.shell.history_index = None;
                         self.shell.input.clear();
                     }
-                    self.shell.cursor_pos = self.shell.input.len();
+                    self.shell.cursor_pos = char_count(&self.shell.input);
                 }
                 AppAction::None
             }
@@ -1453,15 +1588,20 @@ impl App {
                 // Quick commands: digit keys when input is empty
                 if self.shell.input.is_empty() {
                     let presets = [
-                        "getprop", "pm list packages", "dumpsys battery",
-                        "df -h", "top -n 1 -b -m 10", "ps -A",
-                        "netstat -tlnp", "ip addr",
+                        "getprop",
+                        "pm list packages",
+                        "dumpsys battery",
+                        "df -h",
+                        "top -n 1 -b -m 10",
+                        "ps -A",
+                        "netstat -tlnp",
+                        "ip addr",
                     ];
                     if let Some(idx) = c.to_digit(10) {
                         let idx = idx as usize;
                         if idx >= 1 && idx <= 8 {
                             self.shell.input = presets[idx - 1].to_string();
-                            self.shell.cursor_pos = self.shell.input.len();
+                            self.shell.cursor_pos = char_count(&self.shell.input);
                             return AppAction::None;
                         }
                     }
@@ -1475,15 +1615,13 @@ impl App {
                         return AppAction::None;
                     }
                 }
-                self.shell.input.insert(self.shell.cursor_pos, c);
+                insert_char_at(&mut self.shell.input, self.shell.cursor_pos, c);
                 self.shell.cursor_pos += 1;
                 AppAction::None
             }
             KeyCode::Backspace => {
-                if self.shell.cursor_pos > 0 {
-                    self.shell.cursor_pos -= 1;
-                    self.shell.input.remove(self.shell.cursor_pos);
-                }
+                self.shell.cursor_pos =
+                    remove_char_before(&mut self.shell.input, self.shell.cursor_pos);
                 AppAction::None
             }
             KeyCode::Left => {
@@ -1491,7 +1629,7 @@ impl App {
                 AppAction::None
             }
             KeyCode::Right => {
-                if self.shell.cursor_pos < self.shell.input.len() {
+                if self.shell.cursor_pos < char_count(&self.shell.input) {
                     self.shell.cursor_pos += 1;
                 }
                 AppAction::None
@@ -1550,12 +1688,10 @@ impl App {
                 };
                 AppAction::None
             }
-            _ => {
-                match self.logcat.focus {
-                    LogcatFocus::Controls => self.handle_logcat_controls_key(key),
-                    LogcatFocus::Logs => self.handle_logcat_logs_key(key),
-                }
-            }
+            _ => match self.logcat.focus {
+                LogcatFocus::Controls => self.handle_logcat_controls_key(key),
+                LogcatFocus::Logs => self.handle_logcat_logs_key(key),
+            },
         }
     }
 
@@ -1570,9 +1706,7 @@ impl App {
                 self.logcat.control_index = LogcatControl::next_idx(self.logcat.control_index);
                 AppAction::None
             }
-            KeyCode::Enter | KeyCode::Char(' ') => {
-                self.activate_logcat_control()
-            }
+            KeyCode::Enter | KeyCode::Char(' ') => self.activate_logcat_control(),
             _ => AppAction::None,
         }
     }
@@ -1581,7 +1715,11 @@ impl App {
     fn activate_logcat_control(&mut self) -> AppAction {
         match LogcatControl::ALL[self.logcat.control_index] {
             LogcatControl::StartStop => {
-                if self.logcat.is_streaming { AppAction::LogcatStop } else { AppAction::LogcatStart }
+                if self.logcat.is_streaming {
+                    AppAction::LogcatStop
+                } else {
+                    AppAction::LogcatStart
+                }
             }
             LogcatControl::Buffer => {
                 if !self.logcat.is_streaming {
@@ -1597,15 +1735,50 @@ impl App {
                 self.logcat.tag_active = true;
                 AppAction::None
             }
-            LogcatControl::LevelV => { self.logcat.level_filter[0] = !self.logcat.level_filter[0]; AppAction::None }
-            LogcatControl::LevelD => { self.logcat.level_filter[1] = !self.logcat.level_filter[1]; AppAction::None }
-            LogcatControl::LevelI => { self.logcat.level_filter[2] = !self.logcat.level_filter[2]; AppAction::None }
-            LogcatControl::LevelW => { self.logcat.level_filter[3] = !self.logcat.level_filter[3]; AppAction::None }
-            LogcatControl::LevelE => { self.logcat.level_filter[4] = !self.logcat.level_filter[4]; AppAction::None }
-            LogcatControl::LevelF => { self.logcat.level_filter[5] = !self.logcat.level_filter[5]; AppAction::None }
-            LogcatControl::Timestamp => { self.logcat.show_timestamp = !self.logcat.show_timestamp; AppAction::None }
-            LogcatControl::AutoScroll => { self.logcat.auto_scroll = !self.logcat.auto_scroll; AppAction::None }
-            LogcatControl::Clear => { self.logcat.logs.clear(); self.logcat.scroll_offset = 0; AppAction::None }
+            LogcatControl::LevelV => {
+                self.logcat.level_filter[0] = !self.logcat.level_filter[0];
+                AppAction::None
+            }
+            LogcatControl::LevelD => {
+                self.logcat.level_filter[1] = !self.logcat.level_filter[1];
+                AppAction::None
+            }
+            LogcatControl::LevelI => {
+                self.logcat.level_filter[2] = !self.logcat.level_filter[2];
+                AppAction::None
+            }
+            LogcatControl::LevelW => {
+                self.logcat.level_filter[3] = !self.logcat.level_filter[3];
+                AppAction::None
+            }
+            LogcatControl::LevelE => {
+                self.logcat.level_filter[4] = !self.logcat.level_filter[4];
+                AppAction::None
+            }
+            LogcatControl::LevelF => {
+                self.logcat.level_filter[5] = !self.logcat.level_filter[5];
+                AppAction::None
+            }
+            LogcatControl::Timestamp => {
+                self.logcat.show_timestamp = !self.logcat.show_timestamp;
+                AppAction::None
+            }
+            LogcatControl::AutoScroll => {
+                self.logcat.auto_scroll = !self.logcat.auto_scroll;
+                if self.logcat.auto_scroll {
+                    self.logcat.scroll_offset = 0;
+                }
+                AppAction::None
+            }
+            LogcatControl::Clear => {
+                self.logcat.logs.clear();
+                self.logcat.scroll_offset = 0;
+                self.logcat.dropped_lines = 0;
+                if let Some(counter) = &self.logcat.dropped_counter {
+                    counter.store(0, Ordering::Relaxed);
+                }
+                AppAction::None
+            }
         }
     }
 
@@ -1619,6 +1792,9 @@ impl App {
             }
             KeyCode::Down | KeyCode::Char('j') => {
                 self.logcat.scroll_offset = self.logcat.scroll_offset.saturating_sub(1);
+                if self.logcat.scroll_offset == 0 {
+                    self.logcat.auto_scroll = true;
+                }
                 AppAction::None
             }
             KeyCode::Char('G') => {
@@ -1628,7 +1804,7 @@ impl App {
             }
             KeyCode::Char('g') => {
                 self.logcat.auto_scroll = false;
-                self.logcat.scroll_offset = self.logcat.logs.len().saturating_sub(1);
+                self.logcat.scroll_offset = self.logcat.logs.len();
                 AppAction::None
             }
             _ => AppAction::None,
@@ -1638,14 +1814,23 @@ impl App {
     /// Handle text input for search or tag filter.
     fn handle_logcat_text_input(&mut self, key: KeyEvent, is_search: bool) -> AppAction {
         let (query, active) = if is_search {
-            (&mut self.logcat.search_query, &mut self.logcat.search_active)
+            (
+                &mut self.logcat.search_query,
+                &mut self.logcat.search_active,
+            )
         } else {
             (&mut self.logcat.tag_filter, &mut self.logcat.tag_active)
         };
         match key.code {
-            KeyCode::Char(c) => { query.push(c); }
-            KeyCode::Backspace => { query.pop(); }
-            KeyCode::Enter | KeyCode::Esc => { *active = false; }
+            KeyCode::Char(c) => {
+                query.push(c);
+            }
+            KeyCode::Backspace => {
+                query.pop();
+            }
+            KeyCode::Enter | KeyCode::Esc => {
+                *active = false;
+            }
             _ => {}
         }
         AppAction::None
@@ -1665,7 +1850,11 @@ impl App {
                 AppAction::None
             }
             KeyCode::BackTab => {
-                self.controls.focus_section = if self.controls.focus_section == 0 { 5 } else { self.controls.focus_section - 1 };
+                self.controls.focus_section = if self.controls.focus_section == 0 {
+                    5
+                } else {
+                    self.controls.focus_section - 1
+                };
                 self.controls.focus_item = 0;
                 AppAction::None
             }
@@ -1693,7 +1882,10 @@ impl App {
                     AppAction::ControlsExec("input keyevent 25".to_string())
                 } else {
                     self.controls.brightness = self.controls.brightness.saturating_sub(25);
-                    AppAction::ControlsExec(format!("settings put system screen_brightness {}", self.controls.brightness))
+                    AppAction::ControlsExec(format!(
+                        "settings put system screen_brightness {}",
+                        self.controls.brightness
+                    ))
                 }
             }
             KeyCode::Right | KeyCode::Char('l') if self.controls.focus_section == 3 => {
@@ -1702,7 +1894,10 @@ impl App {
                     AppAction::ControlsExec("input keyevent 24".to_string())
                 } else {
                     self.controls.brightness = (self.controls.brightness + 25).min(255);
-                    AppAction::ControlsExec(format!("settings put system screen_brightness {}", self.controls.brightness))
+                    AppAction::ControlsExec(format!(
+                        "settings put system screen_brightness {}",
+                        self.controls.brightness
+                    ))
                 }
             }
             KeyCode::Enter => self.activate_control(),
@@ -1721,11 +1916,17 @@ impl App {
             }
             KeyCode::Char(']') => {
                 self.controls.brightness = (self.controls.brightness + 25).min(255);
-                AppAction::ControlsExec(format!("settings put system screen_brightness {}", self.controls.brightness))
+                AppAction::ControlsExec(format!(
+                    "settings put system screen_brightness {}",
+                    self.controls.brightness
+                ))
             }
             KeyCode::Char('[') => {
                 self.controls.brightness = self.controls.brightness.saturating_sub(25);
-                AppAction::ControlsExec(format!("settings put system screen_brightness {}", self.controls.brightness))
+                AppAction::ControlsExec(format!(
+                    "settings put system screen_brightness {}",
+                    self.controls.brightness
+                ))
             }
             KeyCode::Char('i') => {
                 self.controls.focus_section = 4;
@@ -1739,20 +1940,28 @@ impl App {
     fn handle_controls_text_input(&mut self, key: KeyEvent) -> AppAction {
         match key.code {
             KeyCode::Char(c) => {
-                self.controls.text_input.insert(self.controls.text_cursor_pos, c);
+                insert_char_at(
+                    &mut self.controls.text_input,
+                    self.controls.text_cursor_pos,
+                    c,
+                );
                 self.controls.text_cursor_pos += 1;
                 AppAction::None
             }
             KeyCode::Backspace => {
-                if self.controls.text_cursor_pos > 0 {
-                    self.controls.text_cursor_pos -= 1;
-                    self.controls.text_input.remove(self.controls.text_cursor_pos);
-                }
+                self.controls.text_cursor_pos = remove_char_before(
+                    &mut self.controls.text_input,
+                    self.controls.text_cursor_pos,
+                );
                 AppAction::None
             }
             KeyCode::Enter => {
                 if !self.controls.text_input.is_empty() {
-                    let escaped = self.controls.text_input.replace(' ', "%s").replace('\'', "\\'");
+                    let escaped = self
+                        .controls
+                        .text_input
+                        .replace(' ', "%s")
+                        .replace('\'', "\\'");
                     let cmd = format!("input text '{escaped}'");
                     self.controls.text_input.clear();
                     self.controls.text_cursor_pos = 0;
@@ -1772,7 +1981,8 @@ impl App {
 
     fn activate_control(&mut self) -> AppAction {
         match self.controls.focus_section {
-            0 => { // Power
+            0 => {
+                // Power
                 let (cmd, label) = match self.controls.focus_item {
                     0 => ("reboot", "Reboot"),
                     1 => ("reboot recovery", "Reboot Recovery"),
@@ -1787,7 +1997,8 @@ impl App {
                 };
                 AppAction::None
             }
-            1 => { // Screen
+            1 => {
+                // Screen
                 match self.controls.focus_item {
                     0 => AppAction::ControlsExec("input keyevent 26".to_string()),
                     1 => AppAction::ControlsExec("input swipe 540 1800 540 800".to_string()),
@@ -1802,7 +2013,8 @@ impl App {
                     _ => AppAction::None,
                 }
             }
-            2 => { // Connectivity
+            2 => {
+                // Connectivity
                 match self.controls.focus_item {
                     0 => {
                         self.controls.wifi_enabled = !self.controls.wifi_enabled;
@@ -1831,7 +2043,8 @@ impl App {
                     _ => AppAction::None,
                 }
             }
-            3 => { // Audio & Display — Enter on volume mutes
+            3 => {
+                // Audio & Display — Enter on volume mutes
                 if self.controls.focus_item == 0 {
                     self.controls.volume = 0;
                     AppAction::ControlsExec("input keyevent 164".to_string())
@@ -1839,11 +2052,13 @@ impl App {
                     AppAction::None
                 }
             }
-            4 => { // Text input
+            4 => {
+                // Text input
                 self.controls.text_input_active = true;
                 AppAction::None
             }
-            5 => { // Hardware keys
+            5 => {
+                // Hardware keys
                 let keycode = match self.controls.focus_item {
                     0 => 3,   // HOME
                     1 => 4,   // BACK
@@ -1869,7 +2084,11 @@ impl App {
             }
             KeyCode::Down | KeyCode::Char('j') => {
                 if !self.files.entries.is_empty() {
-                    self.files.selected_index = (self.files.selected_index + 1).min(self.files.entries.len() - 1);
+                    self.files.selected_index = self
+                        .files
+                        .selected_index
+                        .saturating_add(1)
+                        .min(self.files.entries.len() - 1);
                 }
                 AppAction::None
             }
@@ -1974,8 +2193,16 @@ impl App {
         }
 
         match key.code {
-            KeyCode::Char('/') => { self.apps.search_active = true; AppAction::None }
-            KeyCode::Char('f') => { self.apps.filter_type = self.apps.filter_type.next(); AppAction::None }
+            KeyCode::Char('/') => {
+                self.apps.search_active = true;
+                AppAction::None
+            }
+            KeyCode::Char('f') => {
+                self.apps.filter_type = self.apps.filter_type.next();
+                self.apps.selected_index = 0;
+                self.apps.scroll_offset = 0;
+                AppAction::None
+            }
             KeyCode::Char('r') => AppAction::AppsRefresh,
             KeyCode::Tab | KeyCode::BackTab => {
                 self.apps.focus_panel = match self.apps.focus_panel {
@@ -1987,10 +2214,13 @@ impl App {
             KeyCode::Up | KeyCode::Char('k') => {
                 match self.apps.focus_panel {
                     AppPanel::List => {
-                        self.apps.selected_index = self.apps.selected_index.saturating_sub(1);
+                        let max = self.filtered_packages().len().saturating_sub(1);
+                        let current = self.apps.selected_index.min(max);
+                        self.apps.selected_index = current.saturating_sub(1);
                     }
                     AppPanel::Detail => {
-                        self.apps.detail_scroll_offset = self.apps.detail_scroll_offset.saturating_sub(1);
+                        self.apps.detail_scroll_offset =
+                            self.apps.detail_scroll_offset.saturating_sub(1);
                     }
                 }
                 AppAction::None
@@ -1998,10 +2228,13 @@ impl App {
             KeyCode::Down | KeyCode::Char('j') => {
                 match self.apps.focus_panel {
                     AppPanel::List => {
-                        self.apps.selected_index += 1; // Clamped at render time
+                        let max = self.filtered_packages().len().saturating_sub(1);
+                        let current = self.apps.selected_index.min(max);
+                        self.apps.selected_index = current.saturating_add(1).min(max);
                     }
                     AppPanel::Detail => {
-                        self.apps.detail_scroll_offset += 1;
+                        self.apps.detail_scroll_offset =
+                            self.apps.detail_scroll_offset.saturating_add(1);
                     }
                 }
                 AppAction::None
@@ -2010,7 +2243,11 @@ impl App {
                 if self.apps.focus_panel == AppPanel::List {
                     // Load details for selected package
                     let filtered = self.filtered_packages();
-                    if let Some(pkg) = filtered.get(self.apps.selected_index) {
+                    let selected = self
+                        .apps
+                        .selected_index
+                        .min(filtered.len().saturating_sub(1));
+                    if let Some(pkg) = filtered.get(selected) {
                         let name = pkg.package_name.clone();
                         self.apps.detail_package = Some(name.clone());
                         return AppAction::AppsLoadDetails(name);
@@ -2054,25 +2291,44 @@ impl App {
 
     fn handle_apps_search_input(&mut self, key: KeyEvent) -> AppAction {
         match key.code {
-            KeyCode::Char(c) => { self.apps.search_query.push(c); AppAction::None }
-            KeyCode::Backspace => { self.apps.search_query.pop(); AppAction::None }
-            KeyCode::Enter | KeyCode::Esc => { self.apps.search_active = false; AppAction::None }
+            KeyCode::Char(c) => {
+                self.apps.search_query.push(c);
+                self.apps.selected_index = 0;
+                self.apps.scroll_offset = 0;
+                AppAction::None
+            }
+            KeyCode::Backspace => {
+                self.apps.search_query.pop();
+                self.apps.selected_index = 0;
+                self.apps.scroll_offset = 0;
+                AppAction::None
+            }
+            KeyCode::Enter | KeyCode::Esc => {
+                self.apps.search_active = false;
+                AppAction::None
+            }
             _ => AppAction::None,
         }
     }
 
     /// Get filtered package list based on search and filter.
     pub fn filtered_packages(&self) -> Vec<&PackageInfo> {
-        self.apps.packages.iter().filter(|p| {
-            let type_match = match self.apps.filter_type {
-                AppFilter::All => true,
-                AppFilter::User => !p.is_system,
-                AppFilter::System => p.is_system,
-            };
-            let search_match = self.apps.search_query.is_empty()
-                || p.package_name.to_lowercase().contains(&self.apps.search_query.to_lowercase());
-            type_match && search_match
-        }).collect()
+        self.apps
+            .packages
+            .iter()
+            .filter(|p| {
+                let type_match = match self.apps.filter_type {
+                    AppFilter::All => true,
+                    AppFilter::User => !p.is_system,
+                    AppFilter::System => p.is_system,
+                };
+                let search_match = self.apps.search_query.is_empty()
+                    || p.package_name
+                        .to_lowercase()
+                        .contains(&self.apps.search_query.to_lowercase());
+                type_match && search_match
+            })
+            .collect()
     }
 
     fn handle_settings_key(&mut self, key: KeyEvent) -> AppAction {
@@ -2087,7 +2343,10 @@ impl App {
                 self.settings.scroll_offset = 0;
                 AppAction::SettingsLoad
             }
-            KeyCode::Char('/') => { self.settings.search_active = true; AppAction::None }
+            KeyCode::Char('/') => {
+                self.settings.search_active = true;
+                AppAction::None
+            }
             KeyCode::Char('r') => AppAction::SettingsLoad,
             KeyCode::Tab | KeyCode::BackTab => {
                 self.settings.focus_area = match self.settings.focus_area {
@@ -2099,10 +2358,13 @@ impl App {
             KeyCode::Up | KeyCode::Char('k') => {
                 match self.settings.focus_area {
                     SettingsFocus::QuickToggles => {
-                        self.settings.quick_toggle_focus = self.settings.quick_toggle_focus.saturating_sub(1);
+                        self.settings.quick_toggle_focus =
+                            self.settings.quick_toggle_focus.saturating_sub(1);
                     }
                     SettingsFocus::List => {
-                        self.settings.selected_index = self.settings.selected_index.saturating_sub(1);
+                        let max = self.filtered_settings().len().saturating_sub(1);
+                        let current = self.settings.selected_index.min(max);
+                        self.settings.selected_index = current.saturating_sub(1);
                     }
                 }
                 AppAction::None
@@ -2110,10 +2372,13 @@ impl App {
             KeyCode::Down | KeyCode::Char('j') => {
                 match self.settings.focus_area {
                     SettingsFocus::QuickToggles => {
-                        self.settings.quick_toggle_focus = (self.settings.quick_toggle_focus + 1).min(QUICK_TOGGLES.len() - 1);
+                        self.settings.quick_toggle_focus =
+                            (self.settings.quick_toggle_focus + 1).min(QUICK_TOGGLES.len() - 1);
                     }
                     SettingsFocus::List => {
-                        self.settings.selected_index += 1; // Clamped at render time
+                        let max = self.filtered_settings().len().saturating_sub(1);
+                        let current = self.settings.selected_index.min(max);
+                        self.settings.selected_index = current.saturating_add(1).min(max);
                     }
                 }
                 AppAction::None
@@ -2127,15 +2392,20 @@ impl App {
             KeyCode::Char('e') | KeyCode::Enter => {
                 if self.settings.focus_area == SettingsFocus::List {
                     let filtered = self.filtered_settings();
-                    if let Some(entry) = filtered.get(self.settings.selected_index) {
+                    let selected = self
+                        .settings
+                        .selected_index
+                        .min(filtered.len().saturating_sub(1));
+                    if let Some(entry) = filtered.get(selected) {
                         let ns = self.settings.namespace.arg().to_string();
                         let key = entry.key.clone();
                         let value = entry.value.clone();
+                        let modal_value = format!("{ns}:{key}:{value}");
                         self.modal = ModalState::TextInput {
                             title: "Edit Setting".to_string(),
                             prompt: format!("{ns}/{key}"),
-                            value: format!("{ns}:{key}:{value}"),
-                            cursor_pos: ns.len() + key.len() + value.len() + 2,
+                            cursor_pos: char_count(&modal_value),
+                            value: modal_value,
                             action_tag: "settings_edit".to_string(),
                         };
                     }
@@ -2145,7 +2415,11 @@ impl App {
             KeyCode::Char('d') => {
                 if self.settings.focus_area == SettingsFocus::List {
                     let filtered = self.filtered_settings();
-                    if let Some(entry) = filtered.get(self.settings.selected_index) {
+                    let selected = self
+                        .settings
+                        .selected_index
+                        .min(filtered.len().saturating_sub(1));
+                    if let Some(entry) = filtered.get(selected) {
                         let ns = self.settings.namespace.arg().to_string();
                         let key = entry.key.clone();
                         self.modal = ModalState::Confirm {
@@ -2164,9 +2438,22 @@ impl App {
 
     fn handle_settings_search_input(&mut self, key: KeyEvent) -> AppAction {
         match key.code {
-            KeyCode::Char(c) => { self.settings.search_query.push(c); AppAction::None }
-            KeyCode::Backspace => { self.settings.search_query.pop(); AppAction::None }
-            KeyCode::Enter | KeyCode::Esc => { self.settings.search_active = false; AppAction::None }
+            KeyCode::Char(c) => {
+                self.settings.search_query.push(c);
+                self.settings.selected_index = 0;
+                self.settings.scroll_offset = 0;
+                AppAction::None
+            }
+            KeyCode::Backspace => {
+                self.settings.search_query.pop();
+                self.settings.selected_index = 0;
+                self.settings.scroll_offset = 0;
+                AppAction::None
+            }
+            KeyCode::Enter | KeyCode::Esc => {
+                self.settings.search_active = false;
+                AppAction::None
+            }
             _ => AppAction::None,
         }
     }
@@ -2177,9 +2464,13 @@ impl App {
             self.settings.settings.iter().collect()
         } else {
             let q = self.settings.search_query.to_lowercase();
-            self.settings.settings.iter().filter(|s| {
-                s.key.to_lowercase().contains(&q) || s.value.to_lowercase().contains(&q)
-            }).collect()
+            self.settings
+                .settings
+                .iter()
+                .filter(|s| {
+                    s.key.to_lowercase().contains(&q) || s.value.to_lowercase().contains(&q)
+                })
+                .collect()
         }
     }
 
@@ -2219,7 +2510,11 @@ impl App {
             }
             KeyCode::Down | KeyCode::Char('j') => {
                 if !self.bugreport.history.is_empty() {
-                    self.bugreport.selected_index = (self.bugreport.selected_index + 1).min(self.bugreport.history.len() - 1);
+                    self.bugreport.selected_index = self
+                        .bugreport
+                        .selected_index
+                        .saturating_add(1)
+                        .min(self.bugreport.history.len() - 1);
                 }
                 AppAction::None
             }
@@ -2238,26 +2533,30 @@ impl App {
                 self.screen.path_input = self.config.output_dir.clone();
                 AppAction::None
             }
-            KeyCode::Char('1') => { self.screen.active_tab = ScreenTab::Screenshot; AppAction::None }
-            KeyCode::Char('2') => { self.screen.active_tab = ScreenTab::Record; AppAction::None }
-            KeyCode::Char('c') | KeyCode::Enter => {
-                match self.screen.active_tab {
-                    ScreenTab::Screenshot => {
-                        if !self.screen.is_capturing {
-                            AppAction::ScreenCapture
-                        } else {
-                            AppAction::None
-                        }
-                    }
-                    ScreenTab::Record => {
-                        if self.screen.is_recording {
-                            AppAction::ScreenRecordStop
-                        } else {
-                            AppAction::ScreenRecordStart
-                        }
+            KeyCode::Char('1') => {
+                self.screen.active_tab = ScreenTab::Screenshot;
+                AppAction::None
+            }
+            KeyCode::Char('2') => {
+                self.screen.active_tab = ScreenTab::Record;
+                AppAction::None
+            }
+            KeyCode::Char('c') | KeyCode::Enter => match self.screen.active_tab {
+                ScreenTab::Screenshot => {
+                    if !self.screen.is_capturing {
+                        AppAction::ScreenCapture
+                    } else {
+                        AppAction::None
                     }
                 }
-            }
+                ScreenTab::Record => {
+                    if self.screen.is_recording {
+                        AppAction::ScreenRecordStop
+                    } else {
+                        AppAction::ScreenRecordStart
+                    }
+                }
+            },
             KeyCode::Char('d') => {
                 match self.screen.active_tab {
                     ScreenTab::Screenshot => {
@@ -2278,11 +2577,13 @@ impl App {
             KeyCode::Up | KeyCode::Char('k') => {
                 match self.screen.active_tab {
                     ScreenTab::Screenshot => {
-                        self.screen.capture_selected = self.screen.capture_selected.saturating_sub(1);
+                        self.screen.capture_selected =
+                            self.screen.capture_selected.saturating_sub(1);
                         self.load_screenshot_preview();
                     }
                     ScreenTab::Record => {
-                        self.screen.recording_selected = self.screen.recording_selected.saturating_sub(1);
+                        self.screen.recording_selected =
+                            self.screen.recording_selected.saturating_sub(1);
                     }
                 }
                 AppAction::None
@@ -2291,13 +2592,21 @@ impl App {
                 match self.screen.active_tab {
                     ScreenTab::Screenshot => {
                         if !self.screen.captures.is_empty() {
-                            self.screen.capture_selected = (self.screen.capture_selected + 1).min(self.screen.captures.len() - 1);
+                            self.screen.capture_selected = self
+                                .screen
+                                .capture_selected
+                                .saturating_add(1)
+                                .min(self.screen.captures.len() - 1);
                             self.load_screenshot_preview();
                         }
                     }
                     ScreenTab::Record => {
                         if !self.screen.recordings.is_empty() {
-                            self.screen.recording_selected = (self.screen.recording_selected + 1).min(self.screen.recordings.len() - 1);
+                            self.screen.recording_selected = self
+                                .screen
+                                .recording_selected
+                                .saturating_add(1)
+                                .min(self.screen.recordings.len() - 1);
                         }
                     }
                 }
@@ -2317,7 +2626,9 @@ impl App {
                     return AppAction::None;
                 }
                 let expanded = if let Some(rest) = path.strip_prefix('~') {
-                    if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
+                    if let Some(home) =
+                        std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))
+                    {
                         home.to_string_lossy().to_string() + rest
                     } else {
                         path.clone()
@@ -2419,7 +2730,11 @@ impl App {
             return;
         };
         let path = self.config.output_path(&cap.filename);
-        let cmd = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
+        let cmd = if cfg!(target_os = "macos") {
+            "open"
+        } else {
+            "xdg-open"
+        };
         if let Err(e) = std::process::Command::new(cmd).arg(&path).spawn() {
             tracing::warn!("Failed to open screenshot: {e}");
         }
@@ -2435,18 +2750,21 @@ impl App {
                 self.shell.is_streaming = false;
                 self.shell.is_running = false;
                 self.shell.stream_rx = None;
+                if let Some(mut child) = self.shell.stream_child.take() {
+                    let _ = child.start_kill();
+                }
             }
             Page::Logcat => {
                 // Stop logcat streaming
                 self.logcat.is_streaming = false;
                 self.logcat.stream_rx = None;
+                self.logcat.dropped_counter = None;
+                if let Some(mut child) = self.logcat.stream_child.take() {
+                    let _ = child.start_kill();
+                }
             }
             // Bugreport continues in background
             _ => {}
-        }
-        // Kill any lingering child processes
-        for child in self.stream_children.drain(..) {
-            drop(child); // kill_on_drop=true
         }
     }
 
@@ -2462,7 +2780,9 @@ impl App {
                     content: line,
                 });
                 count += 1;
-                if count >= 100 { break; } // Batch limit per tick
+                if count >= 100 {
+                    break;
+                } // Batch limit per tick
             }
             // Trim output
             if self.shell.output.len() > 5000 {
@@ -2474,18 +2794,53 @@ impl App {
 
     /// Drain logcat lines from the streaming channel.
     pub fn drain_logcat_lines(&mut self) {
+        if let Some(counter) = &self.logcat.dropped_counter {
+            let producer_dropped = counter.swap(0, Ordering::Relaxed);
+            if producer_dropped > 0 {
+                self.logcat.dropped_lines =
+                    self.logcat.dropped_lines.saturating_add(producer_dropped);
+            }
+        }
+
         if let Some(ref mut rx) = self.logcat.stream_rx {
-            let mut count = 0;
-            while let Ok(line) = rx.try_recv() {
+            // Drain a bounded raw batch per cycle, then parse only the newest N lines.
+            let mut newest = VecDeque::with_capacity(LOGCAT_PARSE_BATCH);
+            let mut dropped_in_cycle = 0usize;
+            let mut received = 0usize;
+            while received < LOGCAT_RECV_LIMIT {
+                let Ok(line) = rx.try_recv() else {
+                    break;
+                };
+                received += 1;
+                if newest.len() == LOGCAT_PARSE_BATCH {
+                    let _ = newest.pop_front();
+                    dropped_in_cycle += 1;
+                }
+                newest.push_back(line);
+            }
+
+            let mut added = 0usize;
+            for line in newest {
                 if let Some(entry) = parser::parse_logcat_line(&line) {
                     self.logcat.logs.push(entry);
+                    added += 1;
                 }
-                count += 1;
-                if count >= 200 { break; }
             }
-            // Trim
-            if self.logcat.logs.len() > 5000 {
-                let drain = self.logcat.logs.len() - 5000;
+
+            if dropped_in_cycle > 0 {
+                self.logcat.dropped_lines =
+                    self.logcat.dropped_lines.saturating_add(dropped_in_cycle);
+            }
+
+            if self.logcat.auto_scroll {
+                self.logcat.scroll_offset = 0;
+            } else if added > 0 {
+                // Keep the viewport anchored when new lines arrive while paused.
+                self.logcat.scroll_offset = self.logcat.scroll_offset.saturating_add(added);
+            }
+            // Trim in-memory buffer.
+            if self.logcat.logs.len() > LOGCAT_MAX_LINES {
+                let drain = self.logcat.logs.len() - LOGCAT_MAX_LINES;
                 self.logcat.logs.drain(..drain);
                 if self.logcat.scroll_offset > drain {
                     self.logcat.scroll_offset -= drain;
@@ -2519,8 +2874,14 @@ impl App {
                 let before = &line[..slash];
                 let after = &line[slash + 1..];
                 if let (Some(n), Some(m)) = (
-                    before.split_whitespace().last().and_then(|s| s.parse::<u32>().ok()),
-                    after.split_whitespace().next().and_then(|s| s.parse::<u32>().ok()),
+                    before
+                        .split_whitespace()
+                        .last()
+                        .and_then(|s| s.parse::<u32>().ok()),
+                    after
+                        .split_whitespace()
+                        .next()
+                        .and_then(|s| s.parse::<u32>().ok()),
                 ) {
                     if m > 0 {
                         self.bugreport.progress = ((n as f64 / m as f64) * 100.0) as u8;
@@ -2554,6 +2915,7 @@ impl App {
 
         if should_close {
             self.bugreport.stream_rx = None;
+            self.bugreport.stream_child = None;
         }
     }
 
@@ -2575,7 +2937,24 @@ impl App {
     /// Attempt initial device connection.
     pub async fn init_device(&mut self) -> Result<()> {
         self.device_manager.refresh_devices().await?;
+        self.last_device_scan = Some(Instant::now());
         Ok(())
+    }
+
+    /// Whether it's time to refresh adb device discovery.
+    pub fn device_scan_due(&self) -> bool {
+        match self.last_device_scan {
+            None => true,
+            Some(last) => last.elapsed().as_secs() >= DEVICE_SCAN_SECS,
+        }
+    }
+
+    /// Refresh device list and connection state without failing the event loop.
+    pub async fn refresh_device_connection(&mut self) {
+        self.last_device_scan = Some(Instant::now());
+        if let Err(e) = self.device_manager.refresh_devices().await {
+            tracing::warn!("Device refresh failed: {e}");
+        }
     }
 
     /// Refresh dashboard data from device.
@@ -2654,7 +3033,11 @@ impl App {
             let (total_kb, used_kb) = parser::parse_meminfo(&mem_out);
             self.performance.mem_total_kb = total_kb;
             self.performance.mem_used_kb = used_kb;
-            let pct = if total_kb > 0 { used_kb as f64 / total_kb as f64 * 100.0 } else { 0.0 };
+            let pct = if total_kb > 0 {
+                used_kb as f64 / total_kb as f64 * 100.0
+            } else {
+                0.0
+            };
             self.performance.mem_history.push(pct);
             if self.performance.mem_history.len() > 60 {
                 self.performance.mem_history.remove(0);
@@ -2676,7 +3059,12 @@ impl App {
         self.files.error = None;
         self.files.selected_files.clear();
         self.files.selected_index = 0;
-        match self.device_manager.client.shell(&format!("ls -la \"{path}\"")).await {
+        match self
+            .device_manager
+            .client
+            .shell(&format!("ls -la \"{path}\""))
+            .await
+        {
             Ok(output) => {
                 self.files.entries = parser::parse_ls_output(&output, path);
                 self.files.current_path = path.to_string();
@@ -2691,7 +3079,12 @@ impl App {
     /// Refresh the package list for the apps page.
     async fn refresh_packages(&mut self) {
         self.apps.loading = true;
-        match self.device_manager.client.shell("pm list packages -f").await {
+        match self
+            .device_manager
+            .client
+            .shell("pm list packages -f")
+            .await
+        {
             Ok(output) => {
                 self.apps.packages = parser::parse_package_list(&output);
             }
@@ -2706,7 +3099,12 @@ impl App {
     async fn load_settings(&mut self) {
         self.settings.loading = true;
         let ns = self.settings.namespace.arg();
-        match self.device_manager.client.shell(&format!("settings list {ns}")).await {
+        match self
+            .device_manager
+            .client
+            .shell(&format!("settings list {ns}"))
+            .await
+        {
             Ok(output) => {
                 self.settings.settings = parser::parse_settings_list(&output);
             }
@@ -2715,7 +3113,12 @@ impl App {
             }
         }
         for (i, toggle) in QUICK_TOGGLES.iter().enumerate() {
-            if let Ok(val) = self.device_manager.client.shell(&format!("settings get {} {}", toggle.namespace, toggle.key)).await {
+            if let Ok(val) = self
+                .device_manager
+                .client
+                .shell(&format!("settings get {} {}", toggle.namespace, toggle.key))
+                .await
+            {
                 self.settings.quick_toggle_states[i] = val.trim() == toggle.enable_value;
             }
         }
@@ -2723,7 +3126,15 @@ impl App {
     }
 
     pub async fn dispatch_action(&mut self, action: AppAction) {
-        if !self.device_manager.is_connected() {
+        let local_only_action = matches!(
+            &action,
+            AppAction::None
+                | AppAction::ShellStop
+                | AppAction::LogcatStop
+                | AppAction::BugreportCancel
+                | AppAction::ScreenRecordStop
+        );
+        if !local_only_action && !self.device_manager.is_connected() {
             return;
         }
 
@@ -2762,32 +3173,48 @@ impl App {
                 self.shell.is_streaming = false;
                 self.shell.is_running = false;
                 self.shell.stream_rx = None;
-                for child in self.stream_children.drain(..) {
-                    drop(child);
+                if let Some(mut child) = self.shell.stream_child.take() {
+                    let _ = child.start_kill();
                 }
             }
 
             // Logcat
             AppAction::LogcatStart => {
+                if let Some(mut child) = self.logcat.stream_child.take() {
+                    let _ = child.start_kill();
+                }
+                self.logcat.stream_rx = None;
+                self.logcat.dropped_counter = None;
+                self.logcat.is_streaming = false;
                 let buf_arg = self.logcat.buffer.arg();
                 let cmd = format!("logcat -v threadtime -b {buf_arg}");
-                let (tx, rx) = mpsc::unbounded_channel();
-                match self.device_manager.client.shell_stream(&cmd, tx).await {
+                let (tx, rx) = mpsc::channel(LOGCAT_CHANNEL_CAPACITY);
+                let dropped_counter = Arc::new(AtomicUsize::new(0));
+                match self
+                    .device_manager
+                    .client
+                    .shell_stream_lossy(&cmd, tx, dropped_counter.clone())
+                    .await
+                {
                     Ok(child) => {
+                        self.logcat.dropped_lines = 0;
                         self.logcat.stream_rx = Some(rx);
                         self.logcat.is_streaming = true;
-                        self.stream_children.push(child);
+                        self.logcat.stream_child = Some(child);
+                        self.logcat.dropped_counter = Some(dropped_counter);
                     }
                     Err(e) => {
                         tracing::error!("Failed to start logcat: {e}");
+                        self.logcat.dropped_counter = None;
                     }
                 }
             }
             AppAction::LogcatStop => {
                 self.logcat.is_streaming = false;
                 self.logcat.stream_rx = None;
-                for child in self.stream_children.drain(..) {
-                    drop(child);
+                self.logcat.dropped_counter = None;
+                if let Some(mut child) = self.logcat.stream_child.take() {
+                    let _ = child.start_kill();
                 }
             }
 
@@ -2800,8 +3227,25 @@ impl App {
                 self.navigate_files(&path).await;
             }
             AppAction::FilesDelete(paths) => {
+                let mut errors = Vec::new();
                 for path in &paths {
-                    let _ = self.device_manager.client.shell(&format!("rm -rf \"{path}\"")).await;
+                    if let Err(e) = self
+                        .device_manager
+                        .client
+                        .shell(&format!("rm -rf \"{path}\""))
+                        .await
+                    {
+                        errors.push(format!("{path}: {e}"));
+                    }
+                }
+                if errors.is_empty() {
+                    self.files.result = Some((
+                        true,
+                        format!("Deleted {} item(s)", paths.len()),
+                        Instant::now(),
+                    ));
+                } else {
+                    self.files.result = Some((false, errors.join(" | "), Instant::now()));
                 }
                 self.files.selected_files.clear();
                 let path = self.files.current_path.clone();
@@ -2813,17 +3257,33 @@ impl App {
                     let local = self.config.output_path(filename);
                     match self.device_manager.client.pull(path, &local).await {
                         Ok(_) => {
-                            self.controls.result = Some((true, format!("Pulled {filename}")));
-                            self.controls.result_timer = Some(Instant::now());
+                            self.files.result =
+                                Some((true, format!("Pulled {filename}"), Instant::now()));
                         }
                         Err(e) => {
-                            tracing::error!("Pull failed: {e}");
+                            let msg = format!("Pull failed for {filename}: {e}");
+                            tracing::error!("{msg}");
+                            self.files.result = Some((false, msg, Instant::now()));
                         }
                     }
                 }
             }
             AppAction::FilesMkdir(path) => {
-                let _ = self.device_manager.client.shell(&format!("mkdir -p \"{path}\"")).await;
+                match self
+                    .device_manager
+                    .client
+                    .shell(&format!("mkdir -p \"{path}\""))
+                    .await
+                {
+                    Ok(_) => {
+                        self.files.result =
+                            Some((true, "Folder created".to_string(), Instant::now()));
+                    }
+                    Err(e) => {
+                        self.files.result =
+                            Some((false, format!("mkdir failed: {e}"), Instant::now()));
+                    }
+                }
                 let parent = self.files.current_path.clone();
                 self.navigate_files(&parent).await;
             }
@@ -2834,9 +3294,15 @@ impl App {
             }
             AppAction::AppsLoadDetails(name) => {
                 self.apps.detail_loading = true;
-                match self.device_manager.client.shell(&format!("dumpsys package {name}")).await {
+                match self
+                    .device_manager
+                    .client
+                    .shell(&format!("dumpsys package {name}"))
+                    .await
+                {
                     Ok(output) => {
-                        self.apps.package_details = Some(parser::parse_package_details(&output, &name));
+                        self.apps.package_details =
+                            Some(parser::parse_package_details(&output, &name));
                     }
                     Err(e) => {
                         tracing::error!("Failed to get package details: {e}");
@@ -2845,22 +3311,72 @@ impl App {
                 self.apps.detail_loading = false;
             }
             AppAction::AppsOpen(name) => {
-                let _ = self.device_manager.client.shell(&format!("monkey -p {name} -c android.intent.category.LAUNCHER 1")).await;
-                self.apps.action_result = Some((true, format!("Opened {name}"), Instant::now()));
+                match self
+                    .device_manager
+                    .client
+                    .shell(&format!(
+                        "monkey -p {name} -c android.intent.category.LAUNCHER 1"
+                    ))
+                    .await
+                {
+                    Ok(_) => {
+                        self.apps.action_result =
+                            Some((true, format!("Opened {name}"), Instant::now()));
+                    }
+                    Err(e) => {
+                        self.apps.action_result =
+                            Some((false, format!("Open failed: {e}"), Instant::now()));
+                    }
+                }
             }
             AppAction::AppsStop(name) => {
-                let _ = self.device_manager.client.shell(&format!("am force-stop {name}")).await;
-                self.apps.action_result = Some((true, format!("Stopped {name}"), Instant::now()));
+                match self
+                    .device_manager
+                    .client
+                    .shell(&format!("am force-stop {name}"))
+                    .await
+                {
+                    Ok(_) => {
+                        self.apps.action_result =
+                            Some((true, format!("Stopped {name}"), Instant::now()));
+                    }
+                    Err(e) => {
+                        self.apps.action_result =
+                            Some((false, format!("Stop failed: {e}"), Instant::now()));
+                    }
+                }
             }
             AppAction::AppsClear(name) => {
-                let _ = self.device_manager.client.shell(&format!("pm clear {name}")).await;
-                self.apps.action_result = Some((true, format!("Cleared {name}"), Instant::now()));
+                match self
+                    .device_manager
+                    .client
+                    .shell(&format!("pm clear {name}"))
+                    .await
+                {
+                    Ok(_) => {
+                        self.apps.action_result =
+                            Some((true, format!("Cleared {name}"), Instant::now()));
+                    }
+                    Err(e) => {
+                        self.apps.action_result =
+                            Some((false, format!("Clear failed: {e}"), Instant::now()));
+                    }
+                }
             }
             AppAction::AppsUninstall(name) => {
-                match self.device_manager.client.shell(&format!("pm uninstall {name}")).await {
+                match self
+                    .device_manager
+                    .client
+                    .shell(&format!("pm uninstall {name}"))
+                    .await
+                {
                     Ok(output) => {
                         let success = output.contains("Success");
-                        self.apps.action_result = Some((success, format!("Uninstall: {}", output.trim()), Instant::now()));
+                        self.apps.action_result = Some((
+                            success,
+                            format!("Uninstall: {}", output.trim()),
+                            Instant::now(),
+                        ));
                         if success {
                             self.refresh_packages().await;
                         }
@@ -2876,7 +3392,11 @@ impl App {
                 self.controls.loading = Some(cmd.clone());
                 match self.device_manager.client.shell(&cmd).await {
                     Ok(output) => {
-                        let msg = if output.trim().is_empty() { "OK".to_string() } else { output.trim().to_string() };
+                        let msg = if output.trim().is_empty() {
+                            "OK".to_string()
+                        } else {
+                            output.trim().to_string()
+                        };
                         self.controls.result = Some((true, msg));
                     }
                     Err(e) => {
@@ -2892,34 +3412,78 @@ impl App {
                 self.load_settings().await;
             }
             AppAction::SettingsPut(ns, key, value) => {
-                let _ = self.device_manager.client.shell(&format!("settings put {ns} {key} {value}")).await;
+                if let Err(e) = self
+                    .device_manager
+                    .client
+                    .shell(&format!("settings put {ns} {key} {value}"))
+                    .await
+                {
+                    tracing::error!("Failed to set setting {ns}/{key}: {e}");
+                }
                 self.load_settings().await;
             }
             AppAction::SettingsDelete(ns, key) => {
-                let _ = self.device_manager.client.shell(&format!("settings delete {ns} {key}")).await;
+                if let Err(e) = self
+                    .device_manager
+                    .client
+                    .shell(&format!("settings delete {ns} {key}"))
+                    .await
+                {
+                    tracing::error!("Failed to delete setting {ns}/{key}: {e}");
+                }
                 self.load_settings().await;
             }
             AppAction::SettingsToggle(idx) => {
                 if let Some(toggle) = QUICK_TOGGLES.get(idx) {
                     let current = self.settings.quick_toggle_states[idx];
-                    let new_val = if current { toggle.disable_value } else { toggle.enable_value };
-                    let _ = self.device_manager.client.shell(&format!("settings put {} {} {new_val}", toggle.namespace, toggle.key)).await;
-                    self.settings.quick_toggle_states[idx] = !current;
+                    let new_val = if current {
+                        toggle.disable_value
+                    } else {
+                        toggle.enable_value
+                    };
+                    match self
+                        .device_manager
+                        .client
+                        .shell(&format!(
+                            "settings put {} {} {new_val}",
+                            toggle.namespace, toggle.key
+                        ))
+                        .await
+                    {
+                        Ok(_) => {
+                            self.settings.quick_toggle_states[idx] = !current;
+                        }
+                        Err(e) => {
+                            tracing::error!("Failed to toggle setting {}: {e}", toggle.key);
+                        }
+                    }
                 }
             }
 
             // Bugreport
             AppAction::BugreportStart => {
+                if let Some(mut child) = self.bugreport.stream_child.take() {
+                    let _ = child.start_kill();
+                }
                 let (tx, rx) = mpsc::unbounded_channel();
-                match self.device_manager.client.shell_stream("bugreportz", tx).await {
+                match self
+                    .device_manager
+                    .client
+                    .shell_stream("bugreportz", tx)
+                    .await
+                {
                     Ok(child) => {
                         self.bugreport.stream_rx = Some(rx);
+                        self.bugreport.stream_child = Some(child);
                         self.bugreport.is_generating = true;
                         self.bugreport.progress = 0;
                         self.bugreport.start_time = Some(Instant::now());
                         self.bugreport.raw_output.clear();
                         self.bugreport.history.push(BugreportEntry {
-                            filename: format!("bugreport-{}", chrono::Local::now().format("%Y%m%d-%H%M%S")),
+                            filename: format!(
+                                "bugreport-{}",
+                                chrono::Local::now().format("%Y%m%d-%H%M%S")
+                            ),
                             status: BugreportStatus::Generating,
                             start_time: Instant::now(),
                             end_time: None,
@@ -2927,7 +3491,6 @@ impl App {
                             local_path: None,
                             error: None,
                         });
-                        self.stream_children.push(child);
                     }
                     Err(e) => {
                         tracing::error!("Failed to start bugreport: {e}");
@@ -2941,8 +3504,8 @@ impl App {
                     entry.status = BugreportStatus::Cancelled;
                     entry.end_time = Some(Instant::now());
                 }
-                for child in self.stream_children.drain(..) {
-                    drop(child);
+                if let Some(mut child) = self.bugreport.stream_child.take() {
+                    let _ = child.start_kill();
                 }
             }
             AppAction::BugreportDownload(idx) => {
@@ -2968,21 +3531,37 @@ impl App {
                 self.screen.error = None;
                 let timestamp = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
                 let device_path = "/sdcard/adbwrench_screenshot.png";
-                let local_path = self.config.output_path(&format!("screenshot-{timestamp}.png"));
+                let local_path = self
+                    .config
+                    .output_path(&format!("screenshot-{timestamp}.png"));
 
                 let result = async {
-                    self.device_manager.client.shell(&format!("screencap -p {device_path}")).await?;
-                    self.device_manager.client.pull(device_path, &local_path).await?;
-                    self.device_manager.client.shell(&format!("rm {device_path}")).await?;
+                    self.device_manager
+                        .client
+                        .shell(&format!("screencap -p {device_path}"))
+                        .await?;
+                    self.device_manager
+                        .client
+                        .pull(device_path, &local_path)
+                        .await?;
+                    let _ = self
+                        .device_manager
+                        .client
+                        .shell(&format!("rm {device_path}"))
+                        .await;
                     Ok::<(), anyhow::Error>(())
-                }.await;
+                }
+                .await;
 
                 match result {
                     Ok(()) => {
-                        self.screen.captures.insert(0, ScreenCapture {
-                            filename: format!("screenshot-{timestamp}.png"),
-                            timestamp,
-                        });
+                        self.screen.captures.insert(
+                            0,
+                            ScreenCapture {
+                                filename: format!("screenshot-{timestamp}.png"),
+                                timestamp,
+                            },
+                        );
                         self.screen.capture_selected = 0;
                         self.load_screenshot_preview();
                     }
@@ -2994,18 +3573,22 @@ impl App {
                 self.screen.status = None;
             }
             AppAction::ScreenRecordStart => {
+                if let Some(mut child) = self.screen.stream_child.take() {
+                    let _ = child.start_kill();
+                }
                 self.screen.status = Some("STARTING RECORDING...".into());
                 self.screen.error = None;
                 let duration = self.screen.record_duration.secs();
-                let cmd = format!("screenrecord --time-limit {duration} /sdcard/adbwrench_recording.mp4");
+                let cmd =
+                    format!("screenrecord --time-limit {duration} /sdcard/adbwrench_recording.mp4");
                 let (tx, rx) = mpsc::unbounded_channel();
                 match self.device_manager.client.shell_stream(&cmd, tx).await {
                     Ok(child) => {
                         self.screen.stream_rx = Some(rx);
+                        self.screen.stream_child = Some(child);
                         self.screen.is_recording = true;
                         self.screen.record_start = Some(Instant::now());
                         self.screen.record_elapsed = 0;
-                        self.stream_children.push(child);
                     }
                     Err(e) => {
                         self.screen.error = Some(e.to_string());
@@ -3020,7 +3603,7 @@ impl App {
                 self.screen.error = None;
 
                 // Kill the adb process to stop screenrecord on the device
-                for mut child in self.stream_children.drain(..) {
+                if let Some(mut child) = self.screen.stream_child.take() {
                     let _ = child.kill().await;
                 }
 
@@ -3029,10 +3612,21 @@ impl App {
 
                 // Pull the recording
                 let timestamp = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
-                let local_path = self.config.output_path(&format!("recording-{timestamp}.mp4"));
-                match self.device_manager.client.pull("/sdcard/adbwrench_recording.mp4", &local_path).await {
+                let local_path = self
+                    .config
+                    .output_path(&format!("recording-{timestamp}.mp4"));
+                match self
+                    .device_manager
+                    .client
+                    .pull("/sdcard/adbwrench_recording.mp4", &local_path)
+                    .await
+                {
                     Ok(_) => {
-                        let _ = self.device_manager.client.shell("rm /sdcard/adbwrench_recording.mp4").await;
+                        let _ = self
+                            .device_manager
+                            .client
+                            .shell("rm /sdcard/adbwrench_recording.mp4")
+                            .await;
                         self.screen.recordings.push(RecordingEntry {
                             filename: format!("recording-{timestamp}.mp4"),
                             duration_secs: self.screen.record_elapsed,
@@ -3064,6 +3658,12 @@ impl App {
                 self.apps.action_result = None;
             }
         }
+        // Files action result
+        if let Some((_, _, time)) = &self.files.result {
+            if time.elapsed().as_secs() >= 3 {
+                self.files.result = None;
+            }
+        }
         // Dashboard copied feedback
         if let Some((_, time)) = &self.dashboard.copied_feedback {
             if time.elapsed().as_secs() >= 2 {
@@ -3071,10 +3671,148 @@ impl App {
             }
         }
     }
+
+    /// Run periodic/background maintenance regardless of foreground input activity.
+    pub async fn process_background(&mut self) {
+        if self.device_scan_due() {
+            self.refresh_device_connection().await;
+        }
+
+        if self.dashboard_needs_refresh() {
+            self.refresh_dashboard().await;
+        }
+
+        if self.perf_needs_collect() {
+            self.collect_perf_data().await;
+        }
+
+        self.drain_shell_output();
+        self.drain_logcat_lines();
+        self.drain_bugreport_progress();
+        self.update_screen_recording();
+        self.clear_stale_results();
+
+        if let Some(action) = self.pending_action.take() {
+            self.dispatch_action(action).await;
+        }
+    }
 }
 
 impl Default for App {
     fn default() -> Self {
         Self::new(None)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn threadtime_line(i: usize) -> String {
+        let secs = i % 60;
+        format!("01-15 10:30:{secs:02}.123  1234  5678 I TestTag: msg-{i}")
+    }
+
+    fn clear_control_index() -> usize {
+        LogcatControl::ALL
+            .iter()
+            .position(|c| matches!(c, LogcatControl::Clear))
+            .expect("Logcat clear control must exist")
+    }
+
+    #[test]
+    fn logcat_drain_keeps_newest_batch_and_tracks_drops() {
+        let mut app = App::default();
+        let total = LOGCAT_PARSE_BATCH + 25;
+        let (tx, rx) = mpsc::channel(total + 1);
+        app.logcat.stream_rx = Some(rx);
+        app.logcat.auto_scroll = false;
+        app.logcat.scroll_offset = 5;
+
+        for i in 0..total {
+            tx.try_send(threadtime_line(i))
+                .expect("channel should accept test line");
+        }
+        drop(tx);
+
+        app.drain_logcat_lines();
+
+        assert_eq!(app.logcat.logs.len(), LOGCAT_PARSE_BATCH);
+        assert_eq!(app.logcat.dropped_lines, 25);
+        assert_eq!(app.logcat.scroll_offset, 5 + LOGCAT_PARSE_BATCH);
+        assert_eq!(
+            app.logcat.logs.first().map(|e| e.message.as_str()),
+            Some("msg-25")
+        );
+        assert_eq!(
+            app.logcat.logs.last().map(|e| e.message.as_str()),
+            Some(format!("msg-{}", total - 1).as_str())
+        );
+    }
+
+    #[test]
+    fn logcat_drain_counts_producer_drops_even_without_receiver_data() {
+        let mut app = App::default();
+        let counter = Arc::new(AtomicUsize::new(17));
+        app.logcat.dropped_counter = Some(counter.clone());
+
+        app.drain_logcat_lines();
+
+        assert_eq!(app.logcat.dropped_lines, 17);
+        assert_eq!(counter.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn logcat_clear_resets_drop_state_and_visible_buffer() {
+        let mut app = App::default();
+        let counter = Arc::new(AtomicUsize::new(9));
+        app.logcat.dropped_counter = Some(counter.clone());
+        app.logcat.dropped_lines = 12;
+        app.logcat.scroll_offset = 3;
+        app.logcat.logs.push(LogEntry {
+            timestamp: "01-15 10:30:45.123".to_string(),
+            level: LogLevel::Info,
+            tag: "Tag".to_string(),
+            message: "Message".to_string(),
+        });
+        app.logcat.control_index = clear_control_index();
+
+        let action = app.activate_logcat_control();
+
+        assert!(matches!(action, AppAction::None));
+        assert!(app.logcat.logs.is_empty());
+        assert_eq!(app.logcat.scroll_offset, 0);
+        assert_eq!(app.logcat.dropped_lines, 0);
+        assert_eq!(counter.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn logcat_drain_respects_receive_limit_per_cycle() {
+        let mut app = App::default();
+        let total = LOGCAT_RECV_LIMIT + 200;
+        let (tx, rx) = mpsc::channel(total + 1);
+        app.logcat.stream_rx = Some(rx);
+
+        for i in 0..total {
+            tx.try_send(threadtime_line(i))
+                .expect("channel should accept test line");
+        }
+        drop(tx);
+
+        app.drain_logcat_lines();
+
+        let mut remaining = 0usize;
+        if let Some(rx) = app.logcat.stream_rx.as_mut() {
+            while rx.try_recv().is_ok() {
+                remaining += 1;
+            }
+        }
+
+        assert_eq!(remaining, 200);
+        assert_eq!(app.logcat.logs.len(), LOGCAT_PARSE_BATCH);
+        assert_eq!(
+            app.logcat.dropped_lines,
+            LOGCAT_RECV_LIMIT - LOGCAT_PARSE_BATCH
+        );
     }
 }

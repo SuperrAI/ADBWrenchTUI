@@ -1,8 +1,8 @@
+use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
-use ratatui::Frame;
 
 use crate::app::App;
 use crate::theme::Theme;
@@ -11,7 +11,7 @@ use crate::theme::Theme;
 pub fn render(app: &App, frame: &mut Frame, area: Rect) {
     let chunks = Layout::vertical([
         Constraint::Length(2), // header
-        Constraint::Min(0),   // content
+        Constraint::Min(0),    // content
     ])
     .split(area);
 
@@ -19,19 +19,19 @@ pub fn render(app: &App, frame: &mut Frame, area: Rect) {
 
     let content_area = chunks[1];
     let cols = Layout::horizontal([
-        Constraint::Length(2),  // left pad
+        Constraint::Length(2), // left pad
         Constraint::Min(0),    // content
-        Constraint::Length(2),  // right pad
+        Constraint::Length(2), // right pad
     ])
     .split(content_area);
 
     let rows = Layout::vertical([
-        Constraint::Length(1),  // spacer
-        Constraint::Length(9),  // app info card
-        Constraint::Length(1),  // spacer
-        Constraint::Length(7),  // build info card
-        Constraint::Length(1),  // spacer
-        Constraint::Length(5),  // config card
+        Constraint::Length(1), // spacer
+        Constraint::Length(9), // app info card
+        Constraint::Length(1), // spacer
+        Constraint::Length(7), // build info card
+        Constraint::Length(1), // spacer
+        Constraint::Length(5), // config card
         Constraint::Min(0),    // fill
     ])
     .split(cols[1]);
@@ -95,7 +95,14 @@ fn render_build_card(frame: &mut Frame, area: Rect) {
         info_line("RUST", env!("CARGO_PKG_RUST_VERSION", "stable")),
         info_line("TARGET", std::env::consts::ARCH),
         info_line("OS", std::env::consts::OS),
-        info_line("COMMIT", if git_hash.is_empty() { "unknown" } else { git_hash }),
+        info_line(
+            "COMMIT",
+            if git_hash.is_empty() {
+                "unknown"
+            } else {
+                git_hash
+            },
+        ),
         info_line("BUILT", build_time),
     ];
 

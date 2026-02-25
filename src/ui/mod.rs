@@ -1,14 +1,14 @@
-mod sidebar;
-mod dashboard;
-mod shell;
-mod logcat;
-mod files;
-mod apps;
-mod controls;
-mod settings;
-mod bugreport;
-mod screen;
 mod about;
+mod apps;
+mod bugreport;
+mod controls;
+mod dashboard;
+mod files;
+mod logcat;
+mod screen;
+mod settings;
+mod shell;
+mod sidebar;
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -25,16 +25,13 @@ pub fn render(app: &App, frame: &mut Frame) {
     let area = frame.area();
 
     // Set background
-    let bg_block = ratatui::widgets::Block::default()
-        .style(ratatui::style::Style::default().bg(Theme::BG));
+    let bg_block =
+        ratatui::widgets::Block::default().style(ratatui::style::Style::default().bg(Theme::BG));
     frame.render_widget(bg_block, area);
 
     // Two-column layout: sidebar | content
-    let chunks = Layout::horizontal([
-        Constraint::Length(SIDEBAR_WIDTH),
-        Constraint::Min(0),
-    ])
-    .split(area);
+    let chunks =
+        Layout::horizontal([Constraint::Length(SIDEBAR_WIDTH), Constraint::Min(0)]).split(area);
 
     // Render sidebar
     sidebar::render(app, frame, chunks[0]);
@@ -57,10 +54,21 @@ pub fn render(app: &App, frame: &mut Frame) {
     // Render modal overlay if active
     match &app.modal {
         ModalState::None => {}
-        ModalState::Confirm { title, message, confirm_focused, .. } => {
+        ModalState::Confirm {
+            title,
+            message,
+            confirm_focused,
+            ..
+        } => {
             render_confirm_modal(frame, area, title, message, *confirm_focused);
         }
-        ModalState::TextInput { title, prompt, value, cursor_pos, .. } => {
+        ModalState::TextInput {
+            title,
+            prompt,
+            value,
+            cursor_pos,
+            ..
+        } => {
             render_input_modal(frame, area, title, prompt, value, *cursor_pos);
         }
     }
@@ -77,8 +85,7 @@ fn render_page_header(frame: &mut Frame, area: Rect, title: &str, subtitle: &str
         Span::styled(subtitle, Theme::dim()),
     ]);
 
-    let header = Paragraph::new(line)
-        .style(ratatui::style::Style::default().bg(Theme::BG));
+    let header = Paragraph::new(line).style(ratatui::style::Style::default().bg(Theme::BG));
 
     frame.render_widget(header, area);
 }

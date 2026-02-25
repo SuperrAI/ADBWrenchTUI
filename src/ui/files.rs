@@ -1,8 +1,8 @@
+use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
-use ratatui::Frame;
 
 use crate::app::App;
 use crate::components::{render_empty_state, render_keybinding_footer, truncate_str};
@@ -64,7 +64,13 @@ pub fn render(app: &App, frame: &mut Frame, area: Rect) {
         if let Some(ref err) = app.files.error {
             render_error(frame, list_area, err);
         } else {
-            render_empty_state(frame, list_area, "📂", "Empty directory", "Press h to go up");
+            render_empty_state(
+                frame,
+                list_area,
+                "📂",
+                "Empty directory",
+                "Press h to go up",
+            );
         }
     } else {
         render_file_list(app, frame, list_area);
@@ -95,12 +101,23 @@ fn render_header(app: &App, frame: &mut Frame, area: Rect) {
         spans.push(Span::styled("  ⟳ loading", Theme::warning()));
     }
 
+    if let Some((success, ref msg, ref time)) = app.files.result {
+        if time.elapsed().as_secs() < 5 {
+            spans.push(Span::styled("  ", Style::default()));
+            spans.push(Span::styled(
+                truncate_str(msg, 48),
+                if success {
+                    Theme::success()
+                } else {
+                    Theme::error()
+                },
+            ));
+        }
+    }
+
     if let Some(ref err) = app.files.error {
         spans.push(Span::styled("  ", Style::default()));
-        spans.push(Span::styled(
-            truncate_str(err, 40),
-            Theme::error(),
-        ));
+        spans.push(Span::styled(truncate_str(err, 40), Theme::error()));
     }
 
     frame.render_widget(
@@ -164,8 +181,7 @@ fn render_selection_bar(app: &App, frame: &mut Frame, area: Rect) {
     ];
 
     frame.render_widget(
-        Paragraph::new(Line::from(spans))
-            .style(Style::default().bg(Theme::BG)),
+        Paragraph::new(Line::from(spans)).style(Style::default().bg(Theme::BG)),
         area,
     );
 }
@@ -234,13 +250,27 @@ fn render_file_list(app: &App, frame: &mut Frame, area: Rect) {
         let spans = vec![
             Span::styled(format!(" {icon}"), icon_style),
             Span::styled(" ", Style::default()),
-            Span::styled(name_padded, if is_selected { Theme::accent_bold() } else { Theme::text() }),
+            Span::styled(
+                name_padded,
+                if is_selected {
+                    Theme::accent_bold()
+                } else {
+                    Theme::text()
+                },
+            ),
             Span::styled("  ", Style::default()),
             Span::styled(size_str, Theme::dim()),
             Span::styled("  ", Style::default()),
             Span::styled(entry.permissions.clone(), Theme::muted()),
             Span::styled("  ", Style::default()),
-            Span::styled(checkbox, if is_checked { Theme::accent() } else { Theme::muted() }),
+            Span::styled(
+                checkbox,
+                if is_checked {
+                    Theme::accent()
+                } else {
+                    Theme::muted()
+                },
+            ),
             Span::styled(" ", Style::default()),
         ];
 
@@ -286,16 +316,20 @@ fn render_error(frame: &mut Frame, area: Rect, error: &str) {
 // ── Footer ────────────────────────────────────────────────────────
 
 fn render_footer(frame: &mut Frame, area: Rect) {
-    render_keybinding_footer(frame, area, &[
-        ("Enter", "open"),
-        ("Space", "select"),
-        ("h", "up"),
-        ("d", "delete"),
-        ("p", "pull"),
-        ("m", "mkdir"),
-        ("r", "refresh"),
-        ("a", "all"),
-    ]);
+    render_keybinding_footer(
+        frame,
+        area,
+        &[
+            ("Enter", "open"),
+            ("Space", "select"),
+            ("h", "up"),
+            ("d", "delete"),
+            ("p", "pull"),
+            ("m", "mkdir"),
+            ("r", "refresh"),
+            ("a", "all"),
+        ],
+    );
 }
 
 // ── Helpers ───────────────────────────────────────────────────────

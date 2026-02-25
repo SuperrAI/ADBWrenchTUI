@@ -29,9 +29,28 @@ impl DeviceManager {
         let output = self.client.exec(&["devices", "-l"]).await?;
         self.devices = parse_device_list(&output);
 
-        // Auto-select single device
-        if self.devices.len() == 1 && self.current_device.is_none() {
-            self.connect_to(&self.devices[0].serial.clone()).await?;
+        let ready_serials: Vec<String> = self
+            .devices
+            .iter()
+            .filter(|d| d.state == "device")
+            .map(|d| d.serial.clone())
+            .collect();
+
+        // Keep current device if still online.
+        if let Some(current_serial) = self.current_device.as_ref().map(|d| d.serial.clone()) {
+            if ready_serials.iter().any(|s| s == &current_serial) {
+                self.state = ConnectionState::Connected;
+                self.client.set_serial(Some(current_serial));
+                return Ok(());
+            }
+            self.mark_disconnected();
+        }
+
+        // No selected device: auto-select first ready device.
+        if let Some(serial) = ready_serials.first() {
+            self.connect_to(serial).await?;
+        } else {
+            self.mark_disconnected();
         }
 
         Ok(())
@@ -43,9 +62,15 @@ impl DeviceManager {
         self.client.set_serial(Some(serial.to_string()));
 
         // Verify device is reachable
-        let model = self.client.getprop("ro.product.model").await?;
+        let model = match self.client.getprop("ro.product.model").await {
+            Ok(model) => model,
+            Err(e) => {
+                self.mark_disconnected();
+                return Err(e);
+            }
+        };
         if model.is_empty() {
-            self.state = ConnectionState::Disconnected;
+            self.mark_disconnected();
             anyhow::bail!("Device not responding");
         }
 
@@ -83,6 +108,13 @@ impl DeviceManager {
         self.state = ConnectionState::Connected;
 
         Ok(())
+    }
+
+    fn mark_disconnected(&mut self) {
+        self.state = ConnectionState::Disconnected;
+        self.current_device = None;
+        self.full_info = None;
+        self.client.set_serial(None);
     }
 
     /// Fetch comprehensive device info for the dashboard.
@@ -146,21 +178,13 @@ impl DeviceManager {
         let wm_size_str = wm_size_raw.unwrap_or_default();
         let display_resolution = wm_size_str
             .lines()
-            .find_map(|l| {
-                l.split(':')
-                    .nth(1)
-                    .map(|v| v.trim().to_string())
-            })
+            .find_map(|l| l.split(':').nth(1).map(|v| v.trim().to_string()))
             .unwrap_or_else(|| "Unknown".to_string());
 
         let wm_density_str = wm_density_raw.unwrap_or_default();
         let display_density = wm_density_str
             .lines()
-            .find_map(|l| {
-                l.split(':')
-                    .nth(1)
-                    .map(|v| format!("{} dpi", v.trim()))
-            })
+            .find_map(|l| l.split(':').nth(1).map(|v| format!("{} dpi", v.trim())))
             .unwrap_or_else(|| "Unknown".to_string());
 
         // Parse storage and battery

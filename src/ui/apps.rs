@@ -1,11 +1,13 @@
+use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
-use ratatui::Frame;
 
 use crate::app::{App, AppFilter, AppPanel};
-use crate::components::{render_empty_state, render_keybinding_footer, render_text_input, truncate_str};
+use crate::components::{
+    render_empty_state, render_keybinding_footer, render_text_input, truncate_str,
+};
 use crate::theme::Theme;
 
 /// Render the Apps / Manager page.
@@ -13,7 +15,7 @@ pub fn render(app: &App, frame: &mut Frame, area: Rect) {
     let chunks = Layout::vertical([
         Constraint::Length(2), // header
         Constraint::Length(1), // filter bar
-        Constraint::Min(0),   // two-panel content
+        Constraint::Min(0),    // two-panel content
         Constraint::Length(1), // footer
     ])
     .split(area);
@@ -29,11 +31,8 @@ pub fn render(app: &App, frame: &mut Frame, area: Rect) {
     render_filter_bar(app, frame, chunks[1]);
 
     // Two-panel layout: 60% list | 40% detail
-    let panels = Layout::horizontal([
-        Constraint::Percentage(60),
-        Constraint::Percentage(40),
-    ])
-    .split(chunks[2]);
+    let panels = Layout::horizontal([Constraint::Percentage(60), Constraint::Percentage(40)])
+        .split(chunks[2]);
 
     render_package_list(app, frame, panels[0]);
     render_detail_panel(app, frame, panels[1]);
@@ -87,8 +86,8 @@ fn render_header(app: &App, frame: &mut Frame, area: Rect) {
 
 fn render_filter_bar(app: &App, frame: &mut Frame, area: Rect) {
     let filter_cols = Layout::horizontal([
-        Constraint::Min(0),       // search input
-        Constraint::Length(22),   // filter toggles
+        Constraint::Min(0),     // search input
+        Constraint::Length(22), // filter toggles
     ])
     .split(area);
 
@@ -98,7 +97,7 @@ fn render_filter_bar(app: &App, frame: &mut Frame, area: Rect) {
             frame,
             filter_cols[0],
             &app.apps.search_query,
-            app.apps.search_query.len(),
+            app.apps.search_query.chars().count(),
             " SEARCH: ",
             true,
         );
@@ -106,10 +105,7 @@ fn render_filter_bar(app: &App, frame: &mut Frame, area: Rect) {
         let search_display = if app.apps.search_query.is_empty() {
             Span::styled(" SEARCH: (press /)", Theme::muted())
         } else {
-            Span::styled(
-                format!(" SEARCH: {}", app.apps.search_query),
-                Theme::dim(),
-            )
+            Span::styled(format!(" SEARCH: {}", app.apps.search_query), Theme::dim())
         };
         frame.render_widget(
             Paragraph::new(Line::from(search_display)).style(Style::default().bg(Theme::BG)),
@@ -163,13 +159,22 @@ fn render_package_list(app: &App, frame: &mut Frame, area: Rect) {
         if app.apps.loading {
             render_loading(frame, inner);
         } else {
-            render_empty_state(frame, inner, "📦", "No packages found", "Try changing filters or press r to refresh");
+            render_empty_state(
+                frame,
+                inner,
+                "📦",
+                "No packages found",
+                "Try changing filters or press r to refresh",
+            );
         }
         return;
     }
 
     let visible_height = inner.height as usize;
-    let selected = app.apps.selected_index.min(filtered.len().saturating_sub(1));
+    let selected = app
+        .apps
+        .selected_index
+        .min(filtered.len().saturating_sub(1));
     let available_width = inner.width as usize;
 
     // Compute effective scroll that keeps selection visible
@@ -225,7 +230,14 @@ fn render_package_list(app: &App, frame: &mut Frame, area: Rect) {
         let mut spans = vec![
             Span::styled(" [A]", icon_style),
             Span::styled(" ", Style::default()),
-            Span::styled(name_padded, if is_selected { Theme::accent_bold() } else { Theme::text() }),
+            Span::styled(
+                name_padded,
+                if is_selected {
+                    Theme::accent_bold()
+                } else {
+                    Theme::text()
+                },
+            ),
         ];
 
         if pkg.is_system {
@@ -280,7 +292,13 @@ fn render_detail_panel(app: &App, frame: &mut Frame, area: Rect) {
     let details = match app.apps.package_details {
         Some(ref d) => d,
         None => {
-            render_empty_state(frame, inner, "📋", "SELECT A PACKAGE", "Choose a package from the list");
+            render_empty_state(
+                frame,
+                inner,
+                "📋",
+                "SELECT A PACKAGE",
+                "Choose a package from the list",
+            );
             return;
         }
     };
@@ -295,7 +313,7 @@ fn render_detail_panel(app: &App, frame: &mut Frame, area: Rect) {
         Constraint::Length(1), // actions row
         Constraint::Length(1), // spacer
         Constraint::Length(1), // permissions header
-        Constraint::Min(0),   // permissions list
+        Constraint::Min(0),    // permissions list
     ])
     .split(inner);
 
@@ -319,7 +337,10 @@ fn render_detail_panel(app: &App, frame: &mut Frame, area: Rect) {
     );
 
     // Path
-    let path_display = truncate_str(&details.installed_path, inner.width.saturating_sub(8) as usize);
+    let path_display = truncate_str(
+        &details.installed_path,
+        inner.width.saturating_sub(8) as usize,
+    );
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled(" PATH: ", Theme::muted()),
@@ -362,9 +383,10 @@ fn render_detail_panel(app: &App, frame: &mut Frame, area: Rect) {
     // Permissions header
     let perm_count = details.permissions.len();
     frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(format!(" PERMISSIONS ({perm_count})"), Theme::dim()),
-        ])),
+        Paragraph::new(Line::from(vec![Span::styled(
+            format!(" PERMISSIONS ({perm_count})"),
+            Theme::dim(),
+        )])),
         rows[8],
     );
 
@@ -416,14 +438,18 @@ fn render_loading(frame: &mut Frame, area: Rect) {
 // ── Footer ────────────────────────────────────────────────────────
 
 fn render_footer(frame: &mut Frame, area: Rect) {
-    render_keybinding_footer(frame, area, &[
-        ("/", "search"),
-        ("f", "filter"),
-        ("Tab", "panel"),
-        ("o", "open"),
-        ("x", "stop"),
-        ("c", "clear"),
-        ("u", "uninstall"),
-        ("r", "refresh"),
-    ]);
+    render_keybinding_footer(
+        frame,
+        area,
+        &[
+            ("/", "search"),
+            ("f", "filter"),
+            ("Tab", "panel"),
+            ("o", "open"),
+            ("x", "stop"),
+            ("c", "clear"),
+            ("u", "uninstall"),
+            ("r", "refresh"),
+        ],
+    );
 }

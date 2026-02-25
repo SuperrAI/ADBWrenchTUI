@@ -1,8 +1,8 @@
+use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
-use ratatui::Frame;
 
 use crate::app::{App, BugreportStatus};
 use crate::components::{render_gauge, render_keybinding_footer, truncate_str};
@@ -11,9 +11,9 @@ use crate::theme::Theme;
 /// Render the Bugreport page.
 pub fn render(app: &App, frame: &mut Frame, area: Rect) {
     let chunks = Layout::vertical([
-        Constraint::Length(2),  // header
-        Constraint::Length(3),  // info box
-        Constraint::Length(5),  // progress section
+        Constraint::Length(2), // header
+        Constraint::Length(3), // info box
+        Constraint::Length(5), // progress section
         Constraint::Min(0),    // history
         Constraint::Length(1), // footer
     ])
@@ -110,13 +110,16 @@ fn render_progress(app: &App, frame: &mut Frame, area: Rect) {
     let rows = Layout::vertical([
         Constraint::Length(1), // percentage text
         Constraint::Length(1), // gauge
-        Constraint::Min(0),   // elapsed
+        Constraint::Min(0),    // elapsed
     ])
     .split(inner);
 
     // Percentage display
     let pct_text = Line::from(vec![
-        Span::styled(format!(" {}%", app.bugreport.progress), Theme::accent_bold()),
+        Span::styled(
+            format!(" {}%", app.bugreport.progress),
+            Theme::accent_bold(),
+        ),
         Span::styled(" complete", Theme::dim()),
     ]);
     frame.render_widget(Paragraph::new(pct_text), rows[0]);
@@ -165,11 +168,8 @@ fn render_history(app: &App, frame: &mut Frame, area: Rect) {
     frame.render_widget(block, area);
 
     if app.bugreport.history.is_empty() {
-        let hint = Paragraph::new(Span::styled(
-            "No bugreports generated yet",
-            Theme::muted(),
-        ))
-        .alignment(Alignment::Center);
+        let hint = Paragraph::new(Span::styled("No bugreports generated yet", Theme::muted()))
+            .alignment(Alignment::Center);
         let centered = Layout::vertical([
             Constraint::Fill(1),
             Constraint::Length(1),
@@ -182,11 +182,27 @@ fn render_history(app: &App, frame: &mut Frame, area: Rect) {
 
     let visible_height = inner.height as usize;
     let available_width = inner.width as usize;
+    let selected = app
+        .bugreport
+        .selected_index
+        .min(app.bugreport.history.len().saturating_sub(1));
+    let scroll = if selected >= visible_height {
+        selected - visible_height + 1
+    } else {
+        0
+    };
 
     let mut lines: Vec<Line> = Vec::with_capacity(visible_height);
 
-    for (i, entry) in app.bugreport.history.iter().enumerate().take(visible_height) {
-        let is_selected = i == app.bugreport.selected_index;
+    for (i, entry) in app
+        .bugreport
+        .history
+        .iter()
+        .enumerate()
+        .skip(scroll)
+        .take(visible_height)
+    {
+        let is_selected = i == selected;
         let row_style = if is_selected {
             Theme::highlight()
         } else {
@@ -218,7 +234,11 @@ fn render_history(app: &App, frame: &mut Frame, area: Rect) {
             Span::styled(" ", Style::default()),
             Span::styled(
                 truncate_str(&entry.filename, name_max),
-                if is_selected { Theme::accent_bold() } else { Theme::text() },
+                if is_selected {
+                    Theme::accent_bold()
+                } else {
+                    Theme::text()
+                },
             ),
             Span::styled("  ", Style::default()),
             Span::styled(duration_str, Theme::dim()),
@@ -243,10 +263,14 @@ fn render_history(app: &App, frame: &mut Frame, area: Rect) {
 
 /// Footer with keybinding hints.
 fn render_footer(frame: &mut Frame, area: Rect) {
-    render_keybinding_footer(frame, area, &[
-        ("g", "generate"),
-        ("c", "cancel"),
-        ("d", "download"),
-        ("j/k", "navigate"),
-    ]);
+    render_keybinding_footer(
+        frame,
+        area,
+        &[
+            ("g", "generate"),
+            ("c", "cancel"),
+            ("d", "download"),
+            ("j/k", "navigate"),
+        ],
+    );
 }
