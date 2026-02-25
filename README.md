@@ -11,7 +11,7 @@
 ADBWrenchTUI is a high-velocity command center for Android diagnostics and device operations. It is the terminal counterpart of [ADB Wrench](https://adbwrench.com/) by [Superr](https://superr.ai).
 
 <p align="center">
-  <img src="./assets/screenshots/controls.png" alt="ADBWrenchTUI controls view" width="100%">
+  <img src="./assets/screenshots/files.png" alt="ADBWrenchTUI files view" width="100%">
 </p>
 
 ## Why ADBWrenchTUI
@@ -39,20 +39,16 @@ ADBWrenchTUI is a high-velocity command center for Android diagnostics and devic
 <table>
   <tr>
     <td align="center">
-      <img src="./assets/screenshots/controls.png" alt="Controls page" width="100%">
-      <br><sub><b>Controls</b></sub>
-    </td>
-    <td align="center">
       <img src="./assets/screenshots/files.png" alt="Files page" width="100%">
       <br><sub><b>Files</b></sub>
     </td>
-  </tr>
-  <tr>
     <td align="center">
       <img src="./assets/screenshots/settings.png" alt="Settings page" width="100%">
       <br><sub><b>Settings</b></sub>
     </td>
-    <td align="center">
+  </tr>
+  <tr>
+    <td align="center" colspan="2">
       <img src="./assets/screenshots/about.png" alt="About page" width="100%">
       <br><sub><b>About</b></sub>
     </td>
