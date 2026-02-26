@@ -6,7 +6,8 @@ use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
 
 use crate::app::{App, AppFilter, AppPanel};
 use crate::components::{
-    render_empty_state, render_keybinding_footer, render_text_input, truncate_str,
+    list_viewport, pad_list_lines, render_empty_state, render_keybinding_footer, render_text_input,
+    truncate_str,
 };
 use crate::theme::Theme;
 
@@ -118,9 +119,12 @@ fn render_filter_bar(app: &App, frame: &mut Frame, area: Rect) {
     let mut spans = vec![Span::raw(" ")];
     for filter in &filters {
         let is_active = app.apps.filter_type == *filter;
+        let is_hovered = app.hover.apps_filter == Some(*filter);
         let label = filter.label();
         if is_active {
             spans.push(Span::styled(format!("[{label}]"), Theme::accent_bold()));
+        } else if is_hovered {
+            spans.push(Span::styled(format!("[{label}]"), Theme::accent()));
         } else {
             spans.push(Span::styled(format!("[{label}]"), Theme::muted()));
         }
@@ -171,25 +175,19 @@ fn render_package_list(app: &App, frame: &mut Frame, area: Rect) {
     }
 
     let visible_height = inner.height as usize;
-    let selected = app
-        .apps
-        .selected_index
-        .min(filtered.len().saturating_sub(1));
+    let viewport = list_viewport(
+        filtered.len(),
+        visible_height,
+        app.apps.selected_index,
+        app.apps.scroll_offset,
+    );
     let available_width = inner.width as usize;
-
-    // Compute effective scroll that keeps selection visible
-    let mut scroll_offset = app.apps.scroll_offset;
-    if selected < scroll_offset {
-        scroll_offset = selected;
-    } else if visible_height > 0 && selected >= scroll_offset + visible_height {
-        scroll_offset = selected - visible_height + 1;
-    }
 
     let mut lines: Vec<Line> = Vec::with_capacity(visible_height);
 
-    for i in scroll_offset..(scroll_offset + visible_height).min(filtered.len()) {
+    for i in viewport.iter_range() {
         let pkg = filtered[i];
-        let is_selected = i == selected;
+        let is_selected = i == viewport.selected;
 
         let row_style = if is_selected {
             Theme::highlight()
@@ -252,9 +250,7 @@ fn render_package_list(app: &App, frame: &mut Frame, area: Rect) {
     }
 
     // Fill remaining lines
-    while lines.len() < visible_height {
-        lines.push(Line::from("").style(Style::default().bg(Theme::BG)));
-    }
+    pad_list_lines(&mut lines, visible_height);
 
     frame.render_widget(
         Paragraph::new(lines).style(Style::default().bg(Theme::BG)),

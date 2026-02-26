@@ -8,6 +8,9 @@ on:
 permissions:
   contents: write
 
+env:
+  BIN_NAME: adbwrenchtui
+
 jobs:
   build:
     strategy:
@@ -30,6 +33,7 @@ jobs:
             label: windows-x86_64
 
     runs-on: ${{ matrix.os }}
+
     steps:
       - uses: actions/checkout@v4
 
@@ -49,25 +53,54 @@ jobs:
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}
 
-      - name: Prepare binary (unix)
+      - name: Prepare release assets (unix)
         if: runner.os != 'Windows'
-        run: |
-          cp target/${{ matrix.target }}/release/adbwrenchtui adbwrenchtui-${{ matrix.label }}
-          sha256sum adbwrenchtui-${{ matrix.label }} > adbwrenchtui-${{ matrix.label }}.sha256
-
-      - name: Prepare binary (windows)
-        if: runner.os == 'Windows'
         shell: bash
         run: |
-          cp target/${{ matrix.target }}/release/adbwrenchtui.exe adbwrenchtui-${{ matrix.label }}.exe
-          sha256sum adbwrenchtui-${{ matrix.label }}.exe > adbwrenchtui-${{ matrix.label }}.exe.sha256
+          set -euo pipefail
 
-      - name: Upload artifacts
+          raw="${BIN_NAME}-${{ matrix.label }}"
+          cp "target/${{ matrix.target }}/release/${BIN_NAME}" "${raw}"
+          chmod +x "${raw}"
+
+          archive="${BIN_NAME}-${GITHUB_REF_NAME}-${{ matrix.label }}.tar.gz"
+          tmp_dir="$(mktemp -d)"
+          cp "${raw}" "${tmp_dir}/${BIN_NAME}"
+          tar -czf "${archive}" -C "${tmp_dir}" "${BIN_NAME}"
+          rm -rf "${tmp_dir}"
+
+          sha256sum "${archive}" > "${archive}.sha256"
+
+      - name: Prepare release assets (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $raw = "$env:BIN_NAME-${{ matrix.label }}.exe"
+          Copy-Item "target/${{ matrix.target }}/release/$env:BIN_NAME.exe" $raw
+
+          $archive = "$env:BIN_NAME-$env:GITHUB_REF_NAME-${{ matrix.label }}.zip"
+          Compress-Archive -Path $raw -DestinationPath $archive
+
+          $hash = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLower()
+          "$hash  $archive" | Out-File -FilePath "$archive.sha256" -Encoding ascii
+
+      - name: Upload release artifacts (unix)
+        if: runner.os != 'Windows'
         uses: actions/upload-artifact@v4
         with:
-          name: binary-${{ matrix.label }}
+          name: release-${{ matrix.label }}
           path: |
-            adbwrenchtui-${{ matrix.label }}*
+            adbwrenchtui-${{ github.ref_name }}-${{ matrix.label }}.tar.gz
+            adbwrenchtui-${{ github.ref_name }}-${{ matrix.label }}.tar.gz.sha256
+
+      - name: Upload release artifacts (windows)
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.label }}
+          path: |
+            adbwrenchtui-${{ github.ref_name }}-${{ matrix.label }}.zip
+            adbwrenchtui-${{ github.ref_name }}-${{ matrix.label }}.zip.sha256
 
   release:
     needs: build
@@ -75,23 +108,26 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download all artifacts
+      - name: Download release artifacts
         uses: actions/download-artifact@v4
         with:
+          pattern: release-*
           path: artifacts
           merge-multiple: true
 
-      - name: Generate checksums file
+      - name: Generate checksums bundle
+        shell: bash
         run: |
-          cd artifacts
-          cat *.sha256 | sort > ../checksums-sha256.txt
-          cd ..
+          set -euo pipefail
+          cat artifacts/*.sha256 | sort > checksums-sha256.txt
           cp checksums-sha256.txt artifacts/
 
-      - name: Create release
+      - name: Create GitHub release
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
           files: |
-            artifacts/adbwrenchtui-*
+            artifacts/*.tar.gz
+            artifacts/*.zip
+            artifacts/*.sha256
             artifacts/checksums-sha256.txt

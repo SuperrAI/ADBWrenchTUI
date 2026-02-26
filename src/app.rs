@@ -5,7 +5,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
 use anyhow::Result;
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui_image::picker::Picker;
 use ratatui_image::protocol::StatefulProtocol;
 use tokio::sync::mpsc;
@@ -13,6 +14,7 @@ use tokio::sync::mpsc;
 use crate::adb::DeviceManager;
 use crate::adb::parser;
 use crate::adb::types::*;
+use crate::components::list_viewport;
 use crate::config::AppConfig;
 
 // ── Enums for page-specific options ──────────────────────────────
@@ -141,6 +143,8 @@ const LOGCAT_PARSE_BATCH: usize = 1000;
 const LOGCAT_CHANNEL_CAPACITY: usize = 4096;
 /// Max raw logcat lines to receive from channel per background cycle.
 const LOGCAT_RECV_LIMIT: usize = 4096;
+/// Sidebar width used by UI layout (must match `ui::SIDEBAR_WIDTH`).
+const UI_SIDEBAR_WIDTH: u16 = 26;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RecordDuration {
@@ -778,6 +782,18 @@ pub enum Focus {
     Content,
 }
 
+/// Hover metadata for mouse-over visual affordances and contextual hint text.
+#[derive(Debug, Clone, Default)]
+pub struct HoverState {
+    pub sidebar_page: Option<usize>,
+    pub logcat_control: Option<usize>,
+    pub screen_tab: Option<ScreenTab>,
+    pub apps_filter: Option<AppFilter>,
+    pub settings_namespace: Option<SettingsNamespace>,
+    pub settings_quick_toggle: Option<usize>,
+    pub hint: Option<String>,
+}
+
 // ── App struct ───────────────────────────────────────────────────
 
 /// Top-level application state.
@@ -786,6 +802,7 @@ pub struct App {
     pub page: Page,
     pub sidebar_index: usize,
     pub focus: Focus,
+    pub hover: HoverState,
     pub device_manager: DeviceManager,
     pub modal: ModalState,
     pub config: AppConfig,
@@ -841,6 +858,7 @@ impl App {
             sidebar_index: 0,
             config,
             focus: Focus::Sidebar,
+            hover: HoverState::default(),
             device_manager: DeviceManager::new(),
             modal: ModalState::None,
             dashboard: DashboardState {
@@ -987,6 +1005,9 @@ impl App {
     /// Handle a key event at the top level (global keybindings).
     /// Returns true if the event was consumed.
     pub fn handle_key(&mut self, key: KeyEvent) -> bool {
+        // Keyboard activity cancels transient hover affordances.
+        self.hover = HoverState::default();
+
         // Modal captures all keys when active
         if !matches!(self.modal, ModalState::None) {
             return self.handle_modal_key(key);
@@ -1117,14 +1138,1075 @@ impl App {
 
     // ── Mouse handling ────────────────────────────────────────────
 
-    /// Handle mouse events (scroll wheel for scrollable areas).
-    pub fn handle_mouse(&mut self, mouse: crossterm::event::MouseEvent) {
-        use crossterm::event::MouseEventKind;
+    /// Handle mouse events (scroll + left-click navigation/actions).
+    pub fn handle_mouse(&mut self, mouse: MouseEvent) -> AppAction {
+        let (width, height) = crossterm::terminal::size().unwrap_or((0, 0));
+        let area = Rect::new(0, 0, width, height);
+        self.handle_mouse_in_area(mouse, area)
+    }
 
+    fn handle_mouse_in_area(&mut self, mouse: MouseEvent, area: Rect) -> AppAction {
         match mouse.kind {
-            MouseEventKind::ScrollUp => self.handle_scroll(-3),
-            MouseEventKind::ScrollDown => self.handle_scroll(3),
+            MouseEventKind::ScrollUp => {
+                self.handle_scroll(-3);
+                AppAction::None
+            }
+            MouseEventKind::ScrollDown => {
+                self.handle_scroll(3);
+                AppAction::None
+            }
+            MouseEventKind::Moved => {
+                self.update_hover(mouse.column, mouse.row, area);
+                AppAction::None
+            }
+            MouseEventKind::Down(MouseButton::Left) => {
+                let action = self.handle_left_click(mouse.column, mouse.row, area);
+                self.update_hover(mouse.column, mouse.row, area);
+                action
+            }
+            _ => AppAction::None,
+        }
+    }
+
+    fn handle_left_click(&mut self, column: u16, row: u16, area: Rect) -> AppAction {
+        // Modal dialogs are keyboard-driven for now.
+        if !matches!(self.modal, ModalState::None) {
+            return AppAction::None;
+        }
+        if area.width == 0 || area.height == 0 {
+            return AppAction::None;
+        }
+
+        let chunks = Layout::horizontal([Constraint::Length(UI_SIDEBAR_WIDTH), Constraint::Min(0)])
+            .split(area);
+        let sidebar = chunks[0];
+        let content = chunks[1];
+
+        if Self::rect_contains(sidebar, column, row) {
+            self.focus = Focus::Sidebar;
+            self.handle_sidebar_click(sidebar, row);
+            return AppAction::None;
+        }
+        if Self::rect_contains(content, column, row) {
+            self.focus = Focus::Content;
+            if self.is_text_input_active() {
+                return AppAction::None;
+            }
+            return self.handle_content_click(content, column, row);
+        }
+
+        AppAction::None
+    }
+
+    fn handle_sidebar_click(&mut self, sidebar_area: Rect, row: u16) {
+        let Some(page_index) = Self::sidebar_page_index_at_row(sidebar_area, row) else {
+            return;
+        };
+        let old_page = self.page;
+        self.sidebar_index = page_index;
+        self.page = Page::ALL[page_index];
+        if old_page != self.page {
+            self.on_page_leave(old_page);
+        }
+    }
+
+    fn handle_content_click(&mut self, content_area: Rect, column: u16, row: u16) -> AppAction {
+        match self.page {
+            Page::Dashboard => self.handle_dashboard_click(content_area, column, row),
+            Page::Logcat => self.handle_logcat_click(content_area, column, row),
+            Page::Screen => self.handle_screen_click_mouse(content_area, column, row),
+            Page::Apps => self.handle_apps_click_mouse(content_area, column, row),
+            Page::Settings => self.handle_settings_click_mouse(content_area, column, row),
+            _ => AppAction::None,
+        }
+    }
+
+    fn update_hover(&mut self, column: u16, row: u16, area: Rect) {
+        self.hover = HoverState::default();
+        if !matches!(self.modal, ModalState::None) || area.width == 0 || area.height == 0 {
+            return;
+        }
+
+        let chunks = Layout::horizontal([Constraint::Length(UI_SIDEBAR_WIDTH), Constraint::Min(0)])
+            .split(area);
+        let sidebar = chunks[0];
+        let content = chunks[1];
+
+        if Self::rect_contains(sidebar, column, row) {
+            if let Some(page_idx) = Self::sidebar_page_index_at_row(sidebar, row) {
+                self.hover.sidebar_page = Some(page_idx);
+                self.hover.hint = Some(format!("Click to open {}", Page::ALL[page_idx].label()));
+            }
+            return;
+        }
+        if !Self::rect_contains(content, column, row) {
+            return;
+        }
+
+        match self.page {
+            Page::Logcat => self.update_logcat_hover(content, column, row),
+            Page::Screen => self.update_screen_hover(content, column, row),
+            Page::Apps => self.update_apps_hover(content, column, row),
+            Page::Settings => self.update_settings_hover(content, column, row),
+            Page::Dashboard => {
+                self.hover.hint =
+                    Some("Click sections to focus, then scroll to navigate".to_string());
+            }
             _ => {}
+        }
+    }
+
+    fn update_logcat_hover(&mut self, content_area: Rect, column: u16, row: u16) {
+        let chunks = Layout::vertical([
+            Constraint::Length(2), // header
+            Constraint::Length(1), // control bar
+            Constraint::Length(1), // search/tag display
+            Constraint::Min(0),    // logs
+            Constraint::Length(1), // footer
+        ])
+        .split(content_area);
+
+        if Self::rect_contains(chunks[1], column, row) {
+            let local_x = usize::from(column.saturating_sub(chunks[1].x));
+            if let Some(idx) = self.logcat_control_at_x(local_x) {
+                self.hover.logcat_control = Some(idx);
+                self.hover.hint = Some(self.logcat_control_hint(LogcatControl::ALL[idx]));
+            }
+            return;
+        }
+        if Self::rect_contains(chunks[3], column, row) {
+            self.hover.hint = Some("Scroll to navigate logs; click controls to filter".to_string());
+        }
+    }
+
+    fn update_screen_hover(&mut self, content_area: Rect, column: u16, row: u16) {
+        let path_input_row = if self.screen.path_input_active { 1 } else { 0 };
+        let chunks = Layout::vertical([
+            Constraint::Length(2),              // header
+            Constraint::Length(path_input_row), // path input
+            Constraint::Length(1),              // tab bar
+            Constraint::Min(0),                 // content
+            Constraint::Length(1),              // footer
+        ])
+        .split(content_area);
+
+        if Self::rect_contains(chunks[2], column, row) {
+            let local_x = usize::from(column.saturating_sub(chunks[2].x));
+            if let Some(tab_idx) = Self::bracketed_item_at_x(local_x, &["SCREENSHOT", "RECORD"]) {
+                let tab = if tab_idx == 0 {
+                    ScreenTab::Screenshot
+                } else {
+                    ScreenTab::Record
+                };
+                self.hover.screen_tab = Some(tab);
+                self.hover.hint = Some(format!(
+                    "Click to switch to {} tab",
+                    if matches!(tab, ScreenTab::Screenshot) {
+                        "Screenshot"
+                    } else {
+                        "Record"
+                    }
+                ));
+            }
+            return;
+        }
+
+        if !Self::rect_contains(chunks[3], column, row) {
+            return;
+        }
+
+        match self.screen.active_tab {
+            ScreenTab::Screenshot => {
+                if self.screen.captures.is_empty() {
+                    if !self.screen.is_capturing {
+                        self.hover.hint = Some("Click to capture screenshot".to_string());
+                    }
+                    return;
+                }
+                let cols =
+                    Layout::horizontal([Constraint::Percentage(60), Constraint::Percentage(40)])
+                        .split(chunks[3]);
+                if !Self::rect_contains(cols[1], column, row) {
+                    return;
+                }
+                let inner = Self::inner_rect(cols[1]);
+                if !Self::rect_contains(inner, column, row) || inner.height == 0 {
+                    return;
+                }
+                let visible_height = inner.height as usize;
+                if visible_height == 0 {
+                    return;
+                }
+                let viewport = list_viewport(
+                    self.screen.captures.len(),
+                    visible_height,
+                    self.screen.capture_selected,
+                    0,
+                );
+                let rel_row = usize::from(row.saturating_sub(inner.y));
+                let Some(clicked) = viewport.index_at_row(rel_row) else {
+                    return;
+                };
+                if clicked < self.screen.captures.len() {
+                    self.hover.hint = Some("Click to preview selected screenshot".to_string());
+                }
+            }
+            ScreenTab::Record => {
+                let rows = Layout::vertical([
+                    Constraint::Length(1), // duration selector
+                    Constraint::Length(1), // spacer
+                    Constraint::Length(3), // action button + progress
+                    Constraint::Min(0),    // history
+                ])
+                .split(chunks[3]);
+
+                if Self::rect_contains(rows[0], column, row) {
+                    let local_x = usize::from(column.saturating_sub(rows[0].x));
+                    if Self::bracketed_item_at_x(local_x, &["30S", "1M", "2M", "3M"]).is_some() {
+                        self.hover.hint = Some("Click to set recording duration".to_string());
+                    }
+                    return;
+                }
+                if Self::rect_contains(rows[2], column, row) {
+                    self.hover.hint = Some(if self.screen.is_recording {
+                        "Click to stop recording".to_string()
+                    } else {
+                        "Click to start recording".to_string()
+                    });
+                    return;
+                }
+                if !Self::rect_contains(rows[3], column, row) || self.screen.recordings.is_empty() {
+                    return;
+                }
+                let inner = Self::inner_rect(rows[3]);
+                if !Self::rect_contains(inner, column, row) || inner.height == 0 {
+                    return;
+                }
+                let visible_height = inner.height as usize;
+                if visible_height == 0 {
+                    return;
+                }
+                let viewport = list_viewport(
+                    self.screen.recordings.len(),
+                    visible_height,
+                    self.screen.recording_selected,
+                    0,
+                );
+                let rel_row = usize::from(row.saturating_sub(inner.y));
+                if viewport.index_at_row(rel_row).is_some() {
+                    self.hover.hint = Some("Click to select recording".to_string());
+                }
+            }
+        }
+    }
+
+    fn update_apps_hover(&mut self, content_area: Rect, column: u16, row: u16) {
+        let chunks = Layout::vertical([
+            Constraint::Length(2), // header
+            Constraint::Length(1), // filter bar
+            Constraint::Min(0),    // two-panel content
+            Constraint::Length(1), // footer
+        ])
+        .split(content_area);
+
+        if Self::rect_contains(chunks[1], column, row) {
+            let cols = Layout::horizontal([
+                Constraint::Min(0),     // search
+                Constraint::Length(22), // filter toggles
+            ])
+            .split(chunks[1]);
+            if Self::rect_contains(cols[1], column, row) {
+                let local_x = usize::from(column.saturating_sub(cols[1].x));
+                if let Some(idx) = Self::bracketed_item_at_x(local_x, &["ALL", "USER", "SYSTEM"]) {
+                    let filter = match idx {
+                        0 => AppFilter::All,
+                        1 => AppFilter::User,
+                        _ => AppFilter::System,
+                    };
+                    self.hover.apps_filter = Some(filter);
+                    self.hover.hint = Some(format!(
+                        "Click to filter {} apps",
+                        match filter {
+                            AppFilter::All => "all",
+                            AppFilter::User => "user",
+                            AppFilter::System => "system",
+                        }
+                    ));
+                }
+            }
+            return;
+        }
+
+        if !Self::rect_contains(chunks[2], column, row) {
+            return;
+        }
+        let panels = Layout::horizontal([Constraint::Percentage(60), Constraint::Percentage(40)])
+            .split(chunks[2]);
+        if !Self::rect_contains(panels[0], column, row) {
+            return;
+        }
+        let inner = Self::inner_rect(panels[0]);
+        if !Self::rect_contains(inner, column, row) || inner.height == 0 {
+            return;
+        }
+        let filtered = self.filtered_packages();
+        if filtered.is_empty() {
+            return;
+        }
+        let visible_height = inner.height as usize;
+        if visible_height == 0 {
+            return;
+        }
+        let viewport = list_viewport(
+            filtered.len(),
+            visible_height,
+            self.apps.selected_index,
+            self.apps.scroll_offset,
+        );
+        let rel_row = usize::from(row.saturating_sub(inner.y));
+        if viewport.index_at_row(rel_row).is_some() {
+            self.hover.hint = Some("Click to load package details".to_string());
+        }
+    }
+
+    fn update_settings_hover(&mut self, content_area: Rect, column: u16, row: u16) {
+        let chunks = Layout::vertical([
+            Constraint::Length(2), // header
+            Constraint::Length(1), // spacer
+            Constraint::Length(7), // quick toggles
+            Constraint::Length(1), // spacer
+            Constraint::Length(1), // namespace tabs + search
+            Constraint::Min(0),    // settings list
+            Constraint::Length(1), // footer
+        ])
+        .split(content_area);
+
+        if Self::rect_contains(chunks[2], column, row) {
+            if let Some(idx) = Self::settings_toggle_at(chunks[2], column, row) {
+                self.hover.settings_quick_toggle = Some(idx);
+                self.hover.hint = Some(format!(
+                    "Click to toggle {}",
+                    QUICK_TOGGLES[idx].name.to_lowercase()
+                ));
+            }
+            return;
+        }
+
+        if Self::rect_contains(chunks[4], column, row) {
+            let cols = Layout::horizontal([
+                Constraint::Min(0),     // tabs
+                Constraint::Length(30), // search
+            ])
+            .split(chunks[4]);
+
+            if Self::rect_contains(cols[0], column, row) {
+                let local_x = usize::from(column.saturating_sub(cols[0].x));
+                if let Some(idx) =
+                    Self::bracketed_item_at_x(local_x, &["SYSTEM", "SECURE", "GLOBAL"])
+                {
+                    let ns = match idx {
+                        0 => SettingsNamespace::System,
+                        1 => SettingsNamespace::Secure,
+                        _ => SettingsNamespace::Global,
+                    };
+                    self.hover.settings_namespace = Some(ns);
+                    self.hover.hint = Some(format!(
+                        "Click to switch to {} namespace",
+                        ns.label().to_lowercase()
+                    ));
+                }
+            }
+            return;
+        }
+
+        if !Self::rect_contains(chunks[5], column, row) {
+            return;
+        }
+        let inner = Self::inner_rect(chunks[5]);
+        if !Self::rect_contains(inner, column, row) || inner.height == 0 {
+            return;
+        }
+        let list_chunks = Layout::vertical([
+            Constraint::Length(1), // column header
+            Constraint::Min(0),    // list rows
+        ])
+        .split(inner);
+        if !Self::rect_contains(list_chunks[1], column, row) {
+            return;
+        }
+        let filtered = self.filtered_settings();
+        if filtered.is_empty() {
+            return;
+        }
+        let visible_height = list_chunks[1].height as usize;
+        if visible_height == 0 {
+            return;
+        }
+        let viewport = list_viewport(
+            filtered.len(),
+            visible_height,
+            self.settings.selected_index,
+            self.settings.scroll_offset,
+        );
+        let rel_row = usize::from(row.saturating_sub(list_chunks[1].y));
+        if viewport.index_at_row(rel_row).is_some() {
+            self.hover.hint = Some("Click to select setting".to_string());
+        }
+    }
+
+    fn handle_dashboard_click(&mut self, content_area: Rect, column: u16, row: u16) -> AppAction {
+        let chunks = Layout::vertical([
+            Constraint::Length(2), // header
+            Constraint::Min(0),    // content
+            Constraint::Length(1), // footer
+        ])
+        .split(content_area);
+
+        if !Self::rect_contains(chunks[1], column, row)
+            || !self.device_manager.is_connected()
+            || self.device_manager.full_info.is_none()
+        {
+            return AppAction::None;
+        }
+
+        let rows = Layout::vertical([
+            Constraint::Length(8), // row 1: info cards
+            Constraint::Length(8), // row 2: battery + storage
+            Constraint::Length(3), // row 3: CPU + Memory gauges
+            Constraint::Length(3), // row 4: CPU sparkline
+            Constraint::Length(3), // row 5: Memory sparkline
+            Constraint::Min(0),    // row 6: process table
+        ])
+        .split(chunks[1]);
+
+        if Self::rect_contains(rows[0], column, row) {
+            let info_cols = Layout::horizontal([
+                Constraint::Percentage(34),
+                Constraint::Percentage(33),
+                Constraint::Percentage(33),
+            ])
+            .split(rows[0]);
+
+            let section = if Self::rect_contains(info_cols[0], column, row) {
+                Some(DashboardSection::Device)
+            } else if Self::rect_contains(info_cols[1], column, row) {
+                Some(DashboardSection::Hardware)
+            } else if Self::rect_contains(info_cols[2], column, row) {
+                Some(DashboardSection::Software)
+            } else {
+                None
+            };
+
+            if let Some(section) = section {
+                self.dashboard.focus_section = section;
+                self.dashboard.focus_item = 0;
+                self.performance.scroll_offset = 0;
+            }
+            return AppAction::None;
+        }
+
+        if !Self::rect_contains(rows[5], column, row) {
+            return AppAction::None;
+        }
+
+        let was_focused = self.dashboard.focus_section == DashboardSection::Processes;
+        self.dashboard.focus_section = DashboardSection::Processes;
+
+        if self.performance.processes.is_empty() {
+            self.dashboard.focus_item = 0;
+            return AppAction::None;
+        }
+
+        let inner = Self::inner_rect(rows[5]);
+        if !Self::rect_contains(inner, column, row) || inner.height == 0 {
+            return AppAction::None;
+        }
+
+        let rel_row = usize::from(row.saturating_sub(inner.y));
+        if rel_row == 0 {
+            return AppAction::None;
+        }
+
+        let data_rows = inner.height.saturating_sub(1) as usize;
+        if data_rows == 0 {
+            return AppAction::None;
+        }
+
+        let selected_for_window = if was_focused {
+            self.dashboard.focus_item
+        } else {
+            self.performance.scroll_offset
+        };
+        let viewport = list_viewport(
+            self.performance.processes.len(),
+            data_rows,
+            selected_for_window,
+            self.performance.scroll_offset,
+        );
+
+        let Some(clicked_index) = viewport.index_at_row(rel_row - 1) else {
+            return AppAction::None;
+        };
+        if clicked_index < self.performance.processes.len() {
+            self.dashboard.focus_item = clicked_index;
+            self.performance.scroll_offset = viewport.scroll;
+        }
+
+        AppAction::None
+    }
+
+    fn handle_logcat_click(&mut self, content_area: Rect, column: u16, row: u16) -> AppAction {
+        let chunks = Layout::vertical([
+            Constraint::Length(2), // header
+            Constraint::Length(1), // control bar
+            Constraint::Length(1), // search/tag display
+            Constraint::Min(0),    // logs
+            Constraint::Length(1), // footer
+        ])
+        .split(content_area);
+
+        if Self::rect_contains(chunks[1], column, row) {
+            let local_x = usize::from(column.saturating_sub(chunks[1].x));
+            if let Some(idx) = self.logcat_control_at_x(local_x) {
+                self.logcat.focus = LogcatFocus::Controls;
+                self.logcat.control_index = idx;
+                return self.activate_logcat_control();
+            }
+            return AppAction::None;
+        }
+
+        if Self::rect_contains(chunks[3], column, row) {
+            self.logcat.focus = LogcatFocus::Logs;
+        }
+
+        AppAction::None
+    }
+
+    fn handle_screen_click_mouse(
+        &mut self,
+        content_area: Rect,
+        column: u16,
+        row: u16,
+    ) -> AppAction {
+        let path_input_row = if self.screen.path_input_active { 1 } else { 0 };
+        let chunks = Layout::vertical([
+            Constraint::Length(2),              // header
+            Constraint::Length(path_input_row), // path input
+            Constraint::Length(1),              // tab bar
+            Constraint::Min(0),                 // content
+            Constraint::Length(1),              // footer
+        ])
+        .split(content_area);
+
+        if Self::rect_contains(chunks[2], column, row) {
+            let local_x = usize::from(column.saturating_sub(chunks[2].x));
+            if let Some(tab_idx) = Self::bracketed_item_at_x(local_x, &["SCREENSHOT", "RECORD"]) {
+                self.screen.active_tab = if tab_idx == 0 {
+                    ScreenTab::Screenshot
+                } else {
+                    ScreenTab::Record
+                };
+            }
+            return AppAction::None;
+        }
+
+        if !Self::rect_contains(chunks[3], column, row) {
+            return AppAction::None;
+        }
+
+        match self.screen.active_tab {
+            ScreenTab::Screenshot => self.handle_screenshot_tab_click(chunks[3], column, row),
+            ScreenTab::Record => self.handle_record_tab_click(chunks[3], column, row),
+        }
+    }
+
+    fn handle_screenshot_tab_click(&mut self, area: Rect, column: u16, row: u16) -> AppAction {
+        if self.screen.captures.is_empty() {
+            if !self.screen.is_capturing {
+                return AppAction::ScreenCapture;
+            }
+            return AppAction::None;
+        }
+
+        let cols = Layout::horizontal([Constraint::Percentage(60), Constraint::Percentage(40)])
+            .split(area);
+        if !Self::rect_contains(cols[1], column, row) {
+            return AppAction::None;
+        }
+
+        let inner = Self::inner_rect(cols[1]);
+        if !Self::rect_contains(inner, column, row) || inner.height == 0 {
+            return AppAction::None;
+        }
+
+        let visible_height = inner.height as usize;
+        if visible_height == 0 {
+            return AppAction::None;
+        }
+
+        let viewport = list_viewport(
+            self.screen.captures.len(),
+            visible_height,
+            self.screen.capture_selected,
+            0,
+        );
+
+        let mut line_to_index: Vec<Option<usize>> = Vec::with_capacity(visible_height);
+        for i in viewport.iter_range() {
+            line_to_index.push(Some(i));
+            if i == viewport.selected && line_to_index.len() < visible_height {
+                line_to_index.push(Some(i));
+            }
+        }
+        while line_to_index.len() < visible_height {
+            line_to_index.push(None);
+        }
+
+        let rel_row = usize::from(row.saturating_sub(inner.y));
+        if let Some(Some(idx)) = line_to_index.get(rel_row) {
+            self.screen.capture_selected = *idx;
+            self.load_screenshot_preview();
+        }
+
+        AppAction::None
+    }
+
+    fn handle_record_tab_click(&mut self, area: Rect, column: u16, row: u16) -> AppAction {
+        let rows = Layout::vertical([
+            Constraint::Length(1), // duration selector
+            Constraint::Length(1), // spacer
+            Constraint::Length(3), // action button + progress
+            Constraint::Min(0),    // history
+        ])
+        .split(area);
+
+        if Self::rect_contains(rows[0], column, row) {
+            let local_x = usize::from(column.saturating_sub(rows[0].x));
+            if let Some(idx) = Self::bracketed_item_at_x(local_x, &["30S", "1M", "2M", "3M"]) {
+                self.screen.record_duration = match idx {
+                    0 => RecordDuration::Sec30,
+                    1 => RecordDuration::Min1,
+                    2 => RecordDuration::Min2,
+                    _ => RecordDuration::Min3,
+                };
+            }
+            return AppAction::None;
+        }
+
+        if Self::rect_contains(rows[2], column, row) {
+            return if self.screen.is_recording {
+                AppAction::ScreenRecordStop
+            } else {
+                AppAction::ScreenRecordStart
+            };
+        }
+
+        if !Self::rect_contains(rows[3], column, row) || self.screen.recordings.is_empty() {
+            return AppAction::None;
+        }
+
+        let inner = Self::inner_rect(rows[3]);
+        if !Self::rect_contains(inner, column, row) || inner.height == 0 {
+            return AppAction::None;
+        }
+
+        let visible_height = inner.height as usize;
+        if visible_height == 0 {
+            return AppAction::None;
+        }
+        let viewport = list_viewport(
+            self.screen.recordings.len(),
+            visible_height,
+            self.screen.recording_selected,
+            0,
+        );
+        let rel_row = usize::from(row.saturating_sub(inner.y));
+        if let Some(clicked) = viewport.index_at_row(rel_row) {
+            self.screen.recording_selected = clicked;
+        }
+
+        AppAction::None
+    }
+
+    fn handle_apps_click_mouse(&mut self, content_area: Rect, column: u16, row: u16) -> AppAction {
+        let chunks = Layout::vertical([
+            Constraint::Length(2), // header
+            Constraint::Length(1), // filter bar
+            Constraint::Min(0),    // two-panel content
+            Constraint::Length(1), // footer
+        ])
+        .split(content_area);
+
+        if Self::rect_contains(chunks[1], column, row) {
+            let filter_cols = Layout::horizontal([
+                Constraint::Min(0),     // search
+                Constraint::Length(22), // filter toggles
+            ])
+            .split(chunks[1]);
+
+            if Self::rect_contains(filter_cols[1], column, row) {
+                let local_x = usize::from(column.saturating_sub(filter_cols[1].x));
+                if let Some(idx) = Self::bracketed_item_at_x(local_x, &["ALL", "USER", "SYSTEM"]) {
+                    self.apps.filter_type = match idx {
+                        0 => AppFilter::All,
+                        1 => AppFilter::User,
+                        _ => AppFilter::System,
+                    };
+                    self.apps.selected_index = 0;
+                    self.apps.scroll_offset = 0;
+                }
+            }
+            return AppAction::None;
+        }
+
+        if !Self::rect_contains(chunks[2], column, row) {
+            return AppAction::None;
+        }
+
+        let panels = Layout::horizontal([Constraint::Percentage(60), Constraint::Percentage(40)])
+            .split(chunks[2]);
+
+        if Self::rect_contains(panels[0], column, row) {
+            self.apps.focus_panel = AppPanel::List;
+            return self.handle_apps_list_click(panels[0], column, row);
+        }
+
+        if Self::rect_contains(panels[1], column, row) {
+            self.apps.focus_panel = AppPanel::Detail;
+        }
+
+        AppAction::None
+    }
+
+    fn handle_apps_list_click(&mut self, area: Rect, column: u16, row: u16) -> AppAction {
+        let inner = Self::inner_rect(area);
+        if !Self::rect_contains(inner, column, row) || inner.height == 0 {
+            return AppAction::None;
+        }
+
+        let filtered = self.filtered_packages();
+        if filtered.is_empty() {
+            return AppAction::None;
+        }
+
+        let visible_height = inner.height as usize;
+        if visible_height == 0 {
+            return AppAction::None;
+        }
+
+        let viewport = list_viewport(
+            filtered.len(),
+            visible_height,
+            self.apps.selected_index,
+            self.apps.scroll_offset,
+        );
+        let rel_row = usize::from(row.saturating_sub(inner.y));
+        let Some(clicked) = viewport.index_at_row(rel_row) else {
+            return AppAction::None;
+        };
+        let package_name = filtered.get(clicked).map(|p| p.package_name.clone());
+        let Some(name) = package_name else {
+            return AppAction::None;
+        };
+
+        self.apps.selected_index = clicked;
+        self.apps.detail_package = Some(name.clone());
+        AppAction::AppsLoadDetails(name)
+    }
+
+    fn handle_settings_click_mouse(
+        &mut self,
+        content_area: Rect,
+        column: u16,
+        row: u16,
+    ) -> AppAction {
+        let chunks = Layout::vertical([
+            Constraint::Length(2), // header
+            Constraint::Length(1), // spacer
+            Constraint::Length(7), // quick toggles
+            Constraint::Length(1), // spacer
+            Constraint::Length(1), // namespace tabs + search
+            Constraint::Min(0),    // settings list
+            Constraint::Length(1), // footer
+        ])
+        .split(content_area);
+
+        if Self::rect_contains(chunks[2], column, row) {
+            if let Some(toggle_idx) = Self::settings_toggle_at(chunks[2], column, row) {
+                self.settings.focus_area = SettingsFocus::QuickToggles;
+                self.settings.quick_toggle_focus = toggle_idx;
+                return AppAction::SettingsToggle(toggle_idx);
+            }
+            return AppAction::None;
+        }
+
+        if Self::rect_contains(chunks[4], column, row) {
+            let cols = Layout::horizontal([
+                Constraint::Min(0),     // tabs
+                Constraint::Length(30), // search
+            ])
+            .split(chunks[4]);
+
+            if Self::rect_contains(cols[0], column, row) {
+                let local_x = usize::from(column.saturating_sub(cols[0].x));
+                if let Some(idx) =
+                    Self::bracketed_item_at_x(local_x, &["SYSTEM", "SECURE", "GLOBAL"])
+                {
+                    let next = match idx {
+                        0 => SettingsNamespace::System,
+                        1 => SettingsNamespace::Secure,
+                        _ => SettingsNamespace::Global,
+                    };
+                    if self.settings.namespace != next {
+                        self.settings.namespace = next;
+                        self.settings.selected_index = 0;
+                        self.settings.scroll_offset = 0;
+                        return AppAction::SettingsLoad;
+                    }
+                }
+            }
+            return AppAction::None;
+        }
+
+        if !Self::rect_contains(chunks[5], column, row) {
+            return AppAction::None;
+        }
+
+        self.settings.focus_area = SettingsFocus::List;
+        let inner = Self::inner_rect(chunks[5]);
+        if !Self::rect_contains(inner, column, row) || inner.height == 0 {
+            return AppAction::None;
+        }
+
+        let list_chunks = Layout::vertical([
+            Constraint::Length(1), // column header
+            Constraint::Min(0),    // list rows
+        ])
+        .split(inner);
+        if !Self::rect_contains(list_chunks[1], column, row) {
+            return AppAction::None;
+        }
+
+        let filtered = self.filtered_settings();
+        if filtered.is_empty() {
+            return AppAction::None;
+        }
+
+        let visible_height = list_chunks[1].height as usize;
+        if visible_height == 0 {
+            return AppAction::None;
+        }
+
+        let viewport = list_viewport(
+            filtered.len(),
+            visible_height,
+            self.settings.selected_index,
+            self.settings.scroll_offset,
+        );
+        let rel_row = usize::from(row.saturating_sub(list_chunks[1].y));
+        if let Some(clicked) = viewport.index_at_row(rel_row) {
+            self.settings.selected_index = clicked;
+        }
+
+        AppAction::None
+    }
+
+    fn logcat_control_at_x(&self, x: usize) -> Option<usize> {
+        let bar_focused = self.logcat.focus == LogcatFocus::Controls
+            && !self.logcat.search_active
+            && !self.logcat.tag_active;
+        let mut cursor = 1usize; // leading space
+
+        for (i, ctrl) in LogcatControl::ALL.iter().enumerate() {
+            let selected = bar_focused && i == self.logcat.control_index;
+            if selected {
+                // Include the selection marker hit-box.
+                if x == cursor {
+                    return Some(i);
+                }
+                cursor += 1;
+            }
+
+            let label = self.logcat_control_label(*ctrl);
+            let token_width = label.chars().count() + 2; // [label]
+            let end = cursor + token_width;
+            if x >= cursor && x < end {
+                return Some(i);
+            }
+            cursor = end + 1; // trailing space
+        }
+
+        None
+    }
+
+    fn logcat_control_label(&self, ctrl: LogcatControl) -> String {
+        match ctrl {
+            LogcatControl::StartStop => {
+                if self.logcat.is_streaming {
+                    "STOP".to_string()
+                } else {
+                    "START".to_string()
+                }
+            }
+            LogcatControl::Buffer => self.logcat.buffer.label().to_string(),
+            LogcatControl::Search => "SEARCH".to_string(),
+            LogcatControl::Tag => "TAG".to_string(),
+            LogcatControl::LevelV => "V".to_string(),
+            LogcatControl::LevelD => "D".to_string(),
+            LogcatControl::LevelI => "I".to_string(),
+            LogcatControl::LevelW => "W".to_string(),
+            LogcatControl::LevelE => "E".to_string(),
+            LogcatControl::LevelF => "F".to_string(),
+            LogcatControl::Timestamp => "TIME".to_string(),
+            LogcatControl::AutoScroll => "AUTO".to_string(),
+            LogcatControl::Clear => "CLR".to_string(),
+        }
+    }
+
+    fn logcat_control_hint(&self, ctrl: LogcatControl) -> String {
+        match ctrl {
+            LogcatControl::StartStop => {
+                if self.logcat.is_streaming {
+                    "Click to stop log stream".to_string()
+                } else {
+                    "Click to start log stream".to_string()
+                }
+            }
+            LogcatControl::Buffer => "Click to cycle log buffer".to_string(),
+            LogcatControl::Search => "Click to edit search filter".to_string(),
+            LogcatControl::Tag => "Click to edit tag filter".to_string(),
+            LogcatControl::LevelV
+            | LogcatControl::LevelD
+            | LogcatControl::LevelI
+            | LogcatControl::LevelW
+            | LogcatControl::LevelE
+            | LogcatControl::LevelF => "Click to toggle log level".to_string(),
+            LogcatControl::Timestamp => "Click to toggle timestamps".to_string(),
+            LogcatControl::AutoScroll => "Click to toggle auto-scroll".to_string(),
+            LogcatControl::Clear => "Click to clear logs".to_string(),
+        }
+    }
+
+    fn settings_toggle_at(area: Rect, column: u16, row: u16) -> Option<usize> {
+        let inner = Self::inner_rect(area);
+        if !Self::rect_contains(inner, column, row) {
+            return None;
+        }
+
+        let rows = Layout::vertical([
+            Constraint::Length(1), // row 1 names
+            Constraint::Length(1), // row 1 desc
+            Constraint::Length(1), // spacer
+            Constraint::Length(1), // row 2 names
+            Constraint::Length(1), // row 2 desc
+        ])
+        .split(inner);
+
+        let (base_idx, row_area) = if Self::rect_contains(rows[0], column, row)
+            || Self::rect_contains(rows[1], column, row)
+        {
+            (0usize, rows[0])
+        } else if Self::rect_contains(rows[3], column, row)
+            || Self::rect_contains(rows[4], column, row)
+        {
+            (3usize, rows[3])
+        } else {
+            return None;
+        };
+
+        let cols = Layout::horizontal([
+            Constraint::Ratio(1, 3),
+            Constraint::Ratio(1, 3),
+            Constraint::Ratio(1, 3),
+        ])
+        .split(row_area);
+
+        for (col_idx, col) in cols.iter().enumerate() {
+            if Self::rect_contains(*col, column, row) {
+                let idx = base_idx + col_idx;
+                if idx < QUICK_TOGGLES.len() {
+                    return Some(idx);
+                }
+            }
+        }
+
+        None
+    }
+
+    fn sidebar_page_index_at_row(sidebar_area: Rect, row: u16) -> Option<usize> {
+        let inner = Rect {
+            x: sidebar_area.x,
+            y: sidebar_area.y,
+            width: sidebar_area.width.saturating_sub(1), // right border only
+            height: sidebar_area.height,
+        };
+        let chunks = Layout::vertical([
+            Constraint::Length(3), // header
+            Constraint::Min(0),    // nav
+            Constraint::Length(4), // device status
+            Constraint::Length(1), // footer
+        ])
+        .split(inner);
+        let nav = chunks[1];
+
+        if row < nav.y || row >= nav.y.saturating_add(nav.height) {
+            return None;
+        }
+        let rel_y = usize::from(row.saturating_sub(nav.y));
+        Self::sidebar_nav_line_map().get(rel_y).copied().flatten()
+    }
+
+    fn sidebar_nav_line_map() -> Vec<Option<usize>> {
+        let mut lines: Vec<Option<usize>> = Vec::new();
+        let mut current_section = "";
+
+        for (i, page) in Page::ALL.iter().enumerate() {
+            let section = page.section();
+            if section != current_section {
+                if !current_section.is_empty() {
+                    lines.push(None); // spacer
+                }
+                lines.push(None); // section header
+                current_section = section;
+            }
+            lines.push(Some(i));
+        }
+
+        lines
+    }
+
+    #[cfg(test)]
+    fn sidebar_line_for_page_index(page_index: usize) -> Option<usize> {
+        Self::sidebar_nav_line_map()
+            .iter()
+            .position(|entry| *entry == Some(page_index))
+    }
+
+    fn bracketed_item_at_x(x: usize, labels: &[&str]) -> Option<usize> {
+        let mut cursor = 1usize; // leading space
+        for (idx, label) in labels.iter().enumerate() {
+            let width = label.chars().count() + 2; // [label]
+            let end = cursor + width;
+            if x >= cursor && x < end {
+                return Some(idx);
+            }
+            cursor = end + 1; // trailing space
+        }
+        None
+    }
+
+    fn rect_contains(area: Rect, column: u16, row: u16) -> bool {
+        let right = area.x.saturating_add(area.width);
+        let bottom = area.y.saturating_add(area.height);
+        column >= area.x && column < right && row >= area.y && row < bottom
+    }
+
+    fn inner_rect(area: Rect) -> Rect {
+        Rect {
+            x: area.x.saturating_add(1),
+            y: area.y.saturating_add(1),
+            width: area.width.saturating_sub(2),
+            height: area.height.saturating_sub(2),
         }
     }
 
@@ -3708,6 +4790,24 @@ impl Default for App {
 mod tests {
     use super::*;
 
+    fn mouse_down(column: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    fn mouse_move(column: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            kind: MouseEventKind::Moved,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
     fn threadtime_line(i: usize) -> String {
         let secs = i % 60;
         format!("01-15 10:30:{secs:02}.123  1234  5678 I TestTag: msg-{i}")
@@ -3718,6 +4818,126 @@ mod tests {
             .iter()
             .position(|c| matches!(c, LogcatControl::Clear))
             .expect("Logcat clear control must exist")
+    }
+
+    #[test]
+    fn mouse_sidebar_click_switches_page() {
+        let mut app = App::default();
+        app.focus = Focus::Content;
+        let area = Rect::new(0, 0, 120, 40);
+        let screen_idx = Page::ALL
+            .iter()
+            .position(|p| *p == Page::Screen)
+            .expect("screen page exists");
+        let line = App::sidebar_line_for_page_index(screen_idx).expect("line for screen page");
+        let row = 3 + line as u16; // Sidebar header is 3 rows.
+
+        let action = app.handle_mouse_in_area(mouse_down(2, row), area);
+
+        assert!(matches!(action, AppAction::None));
+        assert_eq!(app.focus, Focus::Sidebar);
+        assert_eq!(app.page, Page::Screen);
+        assert_eq!(app.sidebar_index, screen_idx);
+    }
+
+    #[test]
+    fn mouse_settings_namespace_click_returns_load_action() {
+        let mut app = App::default();
+        app.page = Page::Settings;
+        app.sidebar_index = Page::ALL
+            .iter()
+            .position(|p| *p == Page::Settings)
+            .expect("settings page exists");
+        app.settings.namespace = SettingsNamespace::System;
+        let area = Rect::new(0, 0, 120, 40);
+
+        // Settings tabs row y = 2(header) + 1(spacer) + 7(quick toggles) + 1(spacer) = 11.
+        let action = app.handle_mouse_in_area(mouse_down(UI_SIDEBAR_WIDTH + 12, 11), area);
+
+        assert!(matches!(action, AppAction::SettingsLoad));
+        assert_eq!(app.focus, Focus::Content);
+        assert_eq!(app.settings.namespace, SettingsNamespace::Secure);
+    }
+
+    #[test]
+    fn mouse_screen_tab_click_switches_active_tab() {
+        let mut app = App::default();
+        app.page = Page::Screen;
+        app.sidebar_index = Page::ALL
+            .iter()
+            .position(|p| *p == Page::Screen)
+            .expect("screen page exists");
+        app.screen.active_tab = ScreenTab::Screenshot;
+        let area = Rect::new(0, 0, 120, 40);
+
+        // Screen tab row starts at y=2 when path input is hidden.
+        let action = app.handle_mouse_in_area(mouse_down(UI_SIDEBAR_WIDTH + 15, 2), area);
+
+        assert!(matches!(action, AppAction::None));
+        assert_eq!(app.focus, Focus::Content);
+        assert_eq!(app.screen.active_tab, ScreenTab::Record);
+    }
+
+    #[test]
+    fn mouse_logcat_control_click_dispatches_start() {
+        let mut app = App::default();
+        app.page = Page::Logcat;
+        app.sidebar_index = Page::ALL
+            .iter()
+            .position(|p| *p == Page::Logcat)
+            .expect("logcat page exists");
+        app.logcat.is_streaming = false;
+        let area = Rect::new(0, 0, 120, 40);
+
+        // Logcat control bar is y=2 and START is the first control.
+        let action = app.handle_mouse_in_area(mouse_down(UI_SIDEBAR_WIDTH + 2, 2), area);
+
+        assert!(matches!(action, AppAction::LogcatStart));
+        assert_eq!(app.focus, Focus::Content);
+        assert_eq!(app.logcat.focus, LogcatFocus::Controls);
+        assert_eq!(app.logcat.control_index, 0);
+    }
+
+    #[test]
+    fn mouse_sidebar_hover_updates_highlight_and_hint() {
+        let mut app = App::default();
+        let area = Rect::new(0, 0, 120, 40);
+        let settings_idx = Page::ALL
+            .iter()
+            .position(|p| *p == Page::Settings)
+            .expect("settings page exists");
+        let line = App::sidebar_line_for_page_index(settings_idx).expect("line for settings page");
+        let row = 3 + line as u16;
+
+        let action = app.handle_mouse_in_area(mouse_move(2, row), area);
+
+        assert!(matches!(action, AppAction::None));
+        assert_eq!(app.hover.sidebar_page, Some(settings_idx));
+        assert_eq!(app.hover.hint.as_deref(), Some("Click to open Settings"));
+    }
+
+    #[test]
+    fn mouse_settings_hover_tracks_namespace_tab_and_hint() {
+        let mut app = App::default();
+        app.page = Page::Settings;
+        app.sidebar_index = Page::ALL
+            .iter()
+            .position(|p| *p == Page::Settings)
+            .expect("settings page exists");
+        let area = Rect::new(0, 0, 120, 40);
+
+        // Settings tabs row y = 11; x selects [SECURE].
+        let action = app.handle_mouse_in_area(mouse_move(UI_SIDEBAR_WIDTH + 12, 11), area);
+
+        assert!(matches!(action, AppAction::None));
+        assert_eq!(
+            app.hover.settings_namespace,
+            Some(SettingsNamespace::Secure)
+        );
+        assert_eq!(
+            app.hover.hint.as_deref(),
+            Some("Click to switch to secure namespace")
+        );
     }
 
     #[test]

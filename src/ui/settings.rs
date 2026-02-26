@@ -5,7 +5,10 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
 
 use crate::app::{App, QUICK_TOGGLES, SettingsFocus, SettingsNamespace};
-use crate::components::{render_keybinding_footer, render_text_input, toggle_span, truncate_str};
+use crate::components::{
+    list_viewport, pad_list_lines, render_keybinding_footer, render_text_input, toggle_span,
+    truncate_str,
+};
 use crate::theme::Theme;
 
 /// Render the Settings page.
@@ -66,7 +69,8 @@ fn render_header(app: &App, frame: &mut Frame, area: Rect) {
 /// Quick toggles grid (3x2) with descriptions.
 fn render_quick_toggles(app: &App, frame: &mut Frame, area: Rect) {
     let is_focused = app.settings.focus_area == SettingsFocus::QuickToggles;
-    let border_style = if is_focused {
+    let has_hover = app.hover.settings_quick_toggle.is_some();
+    let border_style = if is_focused || has_hover {
         Theme::border_active()
     } else {
         Theme::border()
@@ -143,13 +147,22 @@ fn render_toggle_cell(
     let toggle = &QUICK_TOGGLES[toggle_idx];
     let is_on = app.settings.quick_toggle_states[toggle_idx];
     let is_selected = section_focused && app.settings.quick_toggle_focus == toggle_idx;
+    let is_hovered = app.hover.settings_quick_toggle == Some(toggle_idx);
 
     let name_style = if is_selected {
         Theme::accent_bold()
+    } else if is_hovered {
+        Theme::accent()
     } else {
         Theme::text()
     };
-    let prefix = if is_selected { "\u{25b8} " } else { "  " };
+    let prefix = if is_selected {
+        "\u{25b8} "
+    } else if is_hovered {
+        "\u{25b9} "
+    } else {
+        "  "
+    };
 
     // Name + toggle state
     let name_line = Line::from(vec![
@@ -184,11 +197,14 @@ fn render_tabs_and_search(app: &App, frame: &mut Frame, area: Rect) {
         SettingsNamespace::Secure,
         SettingsNamespace::Global,
     ] {
+        let is_hovered = app.hover.settings_namespace == Some(*ns);
         if app.settings.namespace == *ns {
             tab_spans.push(Span::styled(
                 format!("[{}]", ns.label()),
                 Theme::accent_bold(),
             ));
+        } else if is_hovered {
+            tab_spans.push(Span::styled(format!("[{}]", ns.label()), Theme::accent()));
         } else {
             tab_spans.push(Span::styled(format!("[{}]", ns.label()), Theme::muted()));
         }
@@ -295,24 +311,18 @@ fn render_settings_list(app: &App, frame: &mut Frame, area: Rect) {
 
     // List rows
     let visible_height = list_chunks[1].height as usize;
-    let selected = app
-        .settings
-        .selected_index
-        .min(filtered.len().saturating_sub(1));
-
-    // Compute effective scroll that keeps selection visible
-    let mut scroll = app.settings.scroll_offset;
-    if selected < scroll {
-        scroll = selected;
-    } else if visible_height > 0 && selected >= scroll + visible_height {
-        scroll = selected - visible_height + 1;
-    }
+    let viewport = list_viewport(
+        filtered.len(),
+        visible_height,
+        app.settings.selected_index,
+        app.settings.scroll_offset,
+    );
 
     let mut lines: Vec<Line> = Vec::with_capacity(visible_height);
 
-    for i in scroll..(scroll + visible_height).min(filtered.len()) {
+    for i in viewport.iter_range() {
         let entry = filtered[i];
-        let is_selected = i == selected;
+        let is_selected = i == viewport.selected;
 
         let row_style = if is_selected {
             Theme::highlight()
@@ -349,9 +359,7 @@ fn render_settings_list(app: &App, frame: &mut Frame, area: Rect) {
     }
 
     // Fill remaining
-    while lines.len() < visible_height {
-        lines.push(Line::from(""));
-    }
+    pad_list_lines(&mut lines, visible_height);
 
     frame.render_widget(
         Paragraph::new(lines).style(Style::default().bg(Theme::BG)),

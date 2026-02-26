@@ -6,7 +6,9 @@ use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
 use ratatui_image::{Resize, StatefulImage, protocol::StatefulProtocol};
 
 use crate::app::{App, ScreenTab};
-use crate::components::{render_gauge, render_keybinding_footer, render_tab_bar, truncate_str};
+use crate::components::{
+    list_viewport, pad_list_lines, render_gauge, render_keybinding_footer, truncate_str,
+};
 use crate::theme::Theme;
 
 /// Render the Screen page.
@@ -33,14 +35,7 @@ pub fn render(app: &App, frame: &mut Frame, area: Rect) {
         return;
     }
 
-    render_tab_bar(
-        frame,
-        chunks[2],
-        &[
-            ("SCREENSHOT", app.screen.active_tab == ScreenTab::Screenshot),
-            ("RECORD", app.screen.active_tab == ScreenTab::Record),
-        ],
-    );
+    render_tabs(app, frame, chunks[2]);
 
     match app.screen.active_tab {
         ScreenTab::Screenshot => render_screenshot_tab(app, frame, chunks[3]),
@@ -103,6 +98,31 @@ fn render_path_input(app: &App, frame: &mut Frame, area: Rect) {
     ];
     frame.render_widget(
         Paragraph::new(Line::from(spans)).style(Style::default().bg(Theme::BG_ELEVATED)),
+        area,
+    );
+}
+
+fn render_tabs(app: &App, frame: &mut Frame, area: Rect) {
+    let tabs = [
+        (ScreenTab::Screenshot, "SCREENSHOT"),
+        (ScreenTab::Record, "RECORD"),
+    ];
+    let mut spans = vec![Span::raw(" ")];
+    for (tab, label) in tabs {
+        let is_active = app.screen.active_tab == tab;
+        let is_hovered = app.hover.screen_tab == Some(tab);
+        let style = if is_active {
+            Theme::accent_bold()
+        } else if is_hovered {
+            Theme::accent()
+        } else {
+            Theme::muted()
+        };
+        spans.push(Span::styled(format!("[{label}]"), style));
+        spans.push(Span::raw(" "));
+    }
+    frame.render_widget(
+        Paragraph::new(Line::from(spans)).style(Style::default().bg(Theme::BG)),
         area,
     );
 }
@@ -230,24 +250,17 @@ fn render_screenshot_history(app: &App, frame: &mut Frame, area: Rect) {
 
     let visible_height = inner.height as usize;
     let available_width = inner.width as usize;
-
-    // Scroll to keep selection visible
-    let scroll_offset = if app.screen.capture_selected >= visible_height {
-        app.screen.capture_selected - visible_height + 1
-    } else {
-        0
-    };
+    let viewport = list_viewport(
+        app.screen.captures.len(),
+        visible_height,
+        app.screen.capture_selected,
+        0,
+    );
 
     let mut lines: Vec<Line> = Vec::with_capacity(visible_height);
-    for (i, cap) in app
-        .screen
-        .captures
-        .iter()
-        .enumerate()
-        .skip(scroll_offset)
-        .take(visible_height)
-    {
-        let is_selected = i == app.screen.capture_selected;
+    for i in viewport.iter_range() {
+        let cap = &app.screen.captures[i];
+        let is_selected = i == viewport.selected;
         let row_style = if is_selected {
             Theme::highlight()
         } else {
@@ -292,9 +305,7 @@ fn render_screenshot_history(app: &App, frame: &mut Frame, area: Rect) {
         }
     }
 
-    while lines.len() < visible_height {
-        lines.push(Line::from(""));
-    }
+    pad_list_lines(&mut lines, visible_height);
 
     frame.render_widget(
         Paragraph::new(lines).style(Style::default().bg(Theme::BG)),
@@ -403,26 +414,17 @@ fn render_recording_history(app: &App, frame: &mut Frame, area: Rect) {
 
     let visible_height = inner.height as usize;
     let available_width = inner.width as usize;
-    let selected = app
-        .screen
-        .recording_selected
-        .min(app.screen.recordings.len().saturating_sub(1));
-    let scroll = if selected >= visible_height {
-        selected - visible_height + 1
-    } else {
-        0
-    };
+    let viewport = list_viewport(
+        app.screen.recordings.len(),
+        visible_height,
+        app.screen.recording_selected,
+        0,
+    );
 
     let mut lines: Vec<Line> = Vec::with_capacity(visible_height);
-    for (i, rec) in app
-        .screen
-        .recordings
-        .iter()
-        .enumerate()
-        .skip(scroll)
-        .take(visible_height)
-    {
-        let is_selected = i == selected;
+    for i in viewport.iter_range() {
+        let rec = &app.screen.recordings[i];
+        let is_selected = i == viewport.selected;
         let row_style = if is_selected {
             Theme::highlight()
         } else {
@@ -449,9 +451,7 @@ fn render_recording_history(app: &App, frame: &mut Frame, area: Rect) {
         );
     }
 
-    while lines.len() < visible_height {
-        lines.push(Line::from(""));
-    }
+    pad_list_lines(&mut lines, visible_height);
 
     frame.render_widget(
         Paragraph::new(lines).style(Style::default().bg(Theme::BG)),

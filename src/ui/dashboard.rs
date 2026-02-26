@@ -5,7 +5,10 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
 
 use crate::app::{App, DashboardSection};
-use crate::components::{render_gauge, render_keybinding_footer, render_sparkline, truncate_str};
+use crate::components::{
+    list_viewport, pad_list_lines, render_gauge, render_keybinding_footer, render_sparkline,
+    truncate_str,
+};
 use crate::theme::Theme;
 
 pub fn render(app: &App, frame: &mut Frame, area: Rect) {
@@ -531,23 +534,17 @@ fn render_process_table(app: &App, frame: &mut Frame, area: Rect) {
     let procs = &app.performance.processes;
     let data_rows = visible_height.saturating_sub(1); // minus header
 
-    // Scroll offset is driven by focus_item when focused
-    let scroll = if is_focused {
-        let selected = app.dashboard.focus_item;
-        // Keep selected row visible
-        let current_scroll = app.performance.scroll_offset;
-        if selected < current_scroll {
-            selected
-        } else if selected >= current_scroll + data_rows {
-            selected.saturating_sub(data_rows.saturating_sub(1))
-        } else {
-            current_scroll
-        }
+    let selected_for_window = if is_focused {
+        app.dashboard.focus_item
     } else {
-        app.performance
-            .scroll_offset
-            .min(procs.len().saturating_sub(data_rows))
+        app.performance.scroll_offset
     };
+    let viewport = list_viewport(
+        procs.len(),
+        data_rows,
+        selected_for_window,
+        app.performance.scroll_offset,
+    );
 
     // Header row: PID  USER  S  CPU%  MEM%  RES  TIME+  NAME
     // Fixed columns take ~62 chars, NAME fills the rest
@@ -572,7 +569,7 @@ fn render_process_table(app: &App, frame: &mut Frame, area: Rect) {
     let mut lines: Vec<Line> = vec![header];
     let fixed_cols = 58; // approximate width of fixed columns
 
-    for i in scroll..(scroll + data_rows).min(procs.len()) {
+    for i in viewport.iter_range() {
         let p = &procs[i];
         let is_selected = is_focused && i == app.dashboard.focus_item;
         let name_max = available_width.saturating_sub(fixed_cols);
@@ -652,9 +649,7 @@ fn render_process_table(app: &App, frame: &mut Frame, area: Rect) {
         );
     }
 
-    while lines.len() < visible_height {
-        lines.push(Line::from(""));
-    }
+    pad_list_lines(&mut lines, visible_height);
 
     frame.render_widget(
         Paragraph::new(lines).style(Style::default().bg(Theme::BG)),

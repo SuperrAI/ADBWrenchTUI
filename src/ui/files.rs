@@ -5,7 +5,9 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
 use crate::app::App;
-use crate::components::{render_empty_state, render_keybinding_footer, truncate_str};
+use crate::components::{
+    list_viewport, pad_list_lines, render_empty_state, render_keybinding_footer, truncate_str,
+};
 use crate::theme::Theme;
 
 /// Render the Files / Browser page.
@@ -191,22 +193,15 @@ fn render_selection_bar(app: &App, frame: &mut Frame, area: Rect) {
 fn render_file_list(app: &App, frame: &mut Frame, area: Rect) {
     let entries = &app.files.entries;
     let visible_height = area.height as usize;
-    let selected = app.files.selected_index;
-
-    // Calculate scroll offset to keep selected item visible.
-    let scroll_offset = if selected >= visible_height {
-        selected - visible_height + 1
-    } else {
-        0
-    };
+    let viewport = list_viewport(entries.len(), visible_height, app.files.selected_index, 0);
 
     let available_width = area.width as usize;
 
     let mut lines: Vec<Line> = Vec::with_capacity(visible_height);
 
-    for i in scroll_offset..(scroll_offset + visible_height).min(entries.len()) {
+    for i in viewport.iter_range() {
         let entry = &entries[i];
-        let is_selected = i == selected;
+        let is_selected = i == viewport.selected;
         let is_checked = app.files.selected_files.contains(&entry.path);
 
         let row_style = if is_selected {
@@ -278,9 +273,7 @@ fn render_file_list(app: &App, frame: &mut Frame, area: Rect) {
     }
 
     // Fill remaining lines with empty space
-    while lines.len() < visible_height {
-        lines.push(Line::from("").style(Style::default().bg(Theme::BG)));
-    }
+    pad_list_lines(&mut lines, visible_height);
 
     frame.render_widget(
         Paragraph::new(lines).style(Style::default().bg(Theme::BG)),

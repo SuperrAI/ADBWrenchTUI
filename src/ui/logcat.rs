@@ -83,6 +83,7 @@ fn render_control_bar(app: &App, frame: &mut Frame, area: Rect) {
 
     for (i, ctrl) in LogcatControl::ALL.iter().enumerate() {
         let is_sel = is_bar_focused && i == selected;
+        let is_hovered = app.hover.logcat_control == Some(i);
 
         let (label, active) = match ctrl {
             LogcatControl::StartStop => {
@@ -119,6 +120,8 @@ fn render_control_bar(app: &App, frame: &mut Frame, area: Rect) {
 
         let style = if is_sel {
             Theme::accent_bold()
+        } else if is_hovered {
+            Theme::accent()
         } else if let Some(lc) = level_color {
             if active {
                 Style::default().fg(lc)
@@ -131,7 +134,7 @@ fn render_control_bar(app: &App, frame: &mut Frame, area: Rect) {
             Theme::muted()
         };
 
-        let bracket_style = if is_sel {
+        let bracket_style = if is_sel || is_hovered {
             Theme::accent_bold()
         } else {
             Theme::muted()
@@ -139,6 +142,8 @@ fn render_control_bar(app: &App, frame: &mut Frame, area: Rect) {
 
         if is_sel {
             spans.push(Span::styled("▸", Theme::accent()));
+        } else if is_hovered {
+            spans.push(Span::styled("▹", Theme::accent()));
         }
         spans.push(Span::styled("[", bracket_style));
         spans.push(Span::styled(label, style));

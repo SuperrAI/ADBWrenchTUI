@@ -71,6 +71,7 @@ fn render_nav(app: &App, frame: &mut Frame, area: Rect) {
         }
 
         let is_active = i == app.sidebar_index;
+        let is_hovered = app.hover.sidebar_page == Some(i);
         let shortcut = page.shortcut();
         let label = page.label();
 
@@ -79,6 +80,12 @@ fn render_nav(app: &App, frame: &mut Frame, area: Rect) {
                 Span::styled(" ▸ ", Theme::accent()),
                 Span::styled(format!("{shortcut}"), Theme::accent()),
                 Span::styled(format!(" {label}"), Theme::accent_bold()),
+            ])
+        } else if is_hovered {
+            Line::from(vec![
+                Span::styled(" ▹ ", Theme::accent()),
+                Span::styled(format!("{shortcut}"), Theme::accent()),
+                Span::styled(format!(" {label}"), Theme::accent()),
             ])
         } else {
             Line::from(vec![

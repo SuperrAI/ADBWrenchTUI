@@ -64,7 +64,10 @@ async fn main() -> Result<()> {
                 }
             }
             Event::Mouse(mouse) => {
-                app.handle_mouse(mouse);
+                let action = app.handle_mouse(mouse);
+                if !matches!(action, AppAction::None) {
+                    app.dispatch_action(action).await;
+                }
             }
             Event::Resize(_w, _h) => {
                 // Terminal auto-handles resize

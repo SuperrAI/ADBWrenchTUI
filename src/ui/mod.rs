@@ -23,6 +23,9 @@ const SIDEBAR_WIDTH: u16 = 26;
 /// Render the full application UI.
 pub fn render(app: &App, frame: &mut Frame) {
     let area = frame.area();
+    let root = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(area);
+    let main_area = root[0];
+    let hint_area = root[1];
 
     // Set background
     let bg_block =
@@ -30,8 +33,8 @@ pub fn render(app: &App, frame: &mut Frame) {
     frame.render_widget(bg_block, area);
 
     // Two-column layout: sidebar | content
-    let chunks =
-        Layout::horizontal([Constraint::Length(SIDEBAR_WIDTH), Constraint::Min(0)]).split(area);
+    let chunks = Layout::horizontal([Constraint::Length(SIDEBAR_WIDTH), Constraint::Min(0)])
+        .split(main_area);
 
     // Render sidebar
     sidebar::render(app, frame, chunks[0]);
@@ -50,6 +53,8 @@ pub fn render(app: &App, frame: &mut Frame) {
         Page::Settings => settings::render(app, frame, content_area),
         Page::About => about::render(app, frame, content_area),
     }
+
+    render_status_hint(app, frame, hint_area);
 
     // Render modal overlay if active
     match &app.modal {
@@ -72,6 +77,26 @@ pub fn render(app: &App, frame: &mut Frame) {
             render_input_modal(frame, area, title, prompt, value, *cursor_pos);
         }
     }
+}
+
+fn render_status_hint(app: &App, frame: &mut Frame, area: Rect) {
+    use ratatui::style::Style;
+    use ratatui::text::{Line, Span};
+    use ratatui::widgets::Paragraph;
+
+    let hint = app
+        .hover
+        .hint
+        .as_deref()
+        .unwrap_or("Hover over clickable controls for mouse hints");
+    let line = Line::from(vec![
+        Span::styled(" hint ", Theme::accent_bold()),
+        Span::styled(hint, Theme::dim()),
+    ]);
+    frame.render_widget(
+        Paragraph::new(line).style(Style::default().bg(Theme::BG_ELEVATED)),
+        area,
+    );
 }
 
 /// Helper: render a page header bar like "SHELL // ADB".

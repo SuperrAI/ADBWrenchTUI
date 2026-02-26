@@ -5,7 +5,9 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
 
 use crate::app::{App, BugreportStatus};
-use crate::components::{render_gauge, render_keybinding_footer, truncate_str};
+use crate::components::{
+    list_viewport, pad_list_lines, render_gauge, render_keybinding_footer, truncate_str,
+};
 use crate::theme::Theme;
 
 /// Render the Bugreport page.
@@ -182,27 +184,18 @@ fn render_history(app: &App, frame: &mut Frame, area: Rect) {
 
     let visible_height = inner.height as usize;
     let available_width = inner.width as usize;
-    let selected = app
-        .bugreport
-        .selected_index
-        .min(app.bugreport.history.len().saturating_sub(1));
-    let scroll = if selected >= visible_height {
-        selected - visible_height + 1
-    } else {
-        0
-    };
+    let viewport = list_viewport(
+        app.bugreport.history.len(),
+        visible_height,
+        app.bugreport.selected_index,
+        0,
+    );
 
     let mut lines: Vec<Line> = Vec::with_capacity(visible_height);
 
-    for (i, entry) in app
-        .bugreport
-        .history
-        .iter()
-        .enumerate()
-        .skip(scroll)
-        .take(visible_height)
-    {
-        let is_selected = i == selected;
+    for i in viewport.iter_range() {
+        let entry = &app.bugreport.history[i];
+        let is_selected = i == viewport.selected;
         let row_style = if is_selected {
             Theme::highlight()
         } else {
@@ -251,9 +244,7 @@ fn render_history(app: &App, frame: &mut Frame, area: Rect) {
         lines.push(Line::from(spans).style(row_style));
     }
 
-    while lines.len() < visible_height {
-        lines.push(Line::from(""));
-    }
+    pad_list_lines(&mut lines, visible_height);
 
     frame.render_widget(
         Paragraph::new(lines).style(Style::default().bg(Theme::BG)),

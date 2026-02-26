@@ -6,6 +6,74 @@ use ratatui::widgets::{Block, BorderType, Borders, Clear, Gauge, Paragraph, Wrap
 
 use crate::theme::Theme;
 
+// ── List viewport ─────────────────────────────────────────────────
+
+/// Shared list viewport math: selected item clamping + scroll windowing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ListViewport {
+    pub total: usize,
+    pub visible: usize,
+    pub selected: usize,
+    pub scroll: usize,
+}
+
+impl ListViewport {
+    /// Visible index range for the current window.
+    pub fn iter_range(self) -> std::ops::Range<usize> {
+        self.scroll..(self.scroll + self.visible).min(self.total)
+    }
+
+    /// Map a row within the visible window to an underlying item index.
+    pub fn index_at_row(self, row: usize) -> Option<usize> {
+        if row >= self.visible {
+            return None;
+        }
+        let idx = self.scroll + row;
+        (idx < self.total).then_some(idx)
+    }
+}
+
+/// Build a stable viewport for list rendering.
+pub fn list_viewport(
+    total: usize,
+    visible: usize,
+    selected: usize,
+    scroll_hint: usize,
+) -> ListViewport {
+    if total == 0 || visible == 0 {
+        return ListViewport {
+            total,
+            visible,
+            selected: 0,
+            scroll: 0,
+        };
+    }
+
+    let selected = selected.min(total - 1);
+    let max_scroll = total.saturating_sub(visible);
+    let mut scroll = scroll_hint.min(max_scroll);
+
+    if selected < scroll {
+        scroll = selected;
+    } else if selected >= scroll + visible {
+        scroll = selected - visible + 1;
+    }
+
+    ListViewport {
+        total,
+        visible,
+        selected,
+        scroll,
+    }
+}
+
+/// Fill the remaining rows in a list with empty lines.
+pub fn pad_list_lines<'a>(lines: &mut Vec<Line<'a>>, visible: usize) {
+    while lines.len() < visible {
+        lines.push(Line::from(""));
+    }
+}
+
 // ── Progress / gauge ─────────────────────────────────────────────
 
 /// Render a horizontal progress bar in a single-line area.
@@ -33,27 +101,6 @@ pub fn render_keybinding_footer(frame: &mut Frame, area: Rect, bindings: &[(&str
         if i < bindings.len() - 1 {
             spans.push(Span::styled("  ", Style::default()));
         }
-    }
-    frame.render_widget(
-        Paragraph::new(Line::from(spans)).style(Style::default().bg(Theme::BG)),
-        area,
-    );
-}
-
-// ── Tab bar ──────────────────────────────────────────────────────
-
-/// Render a row of toggleable tabs: `[TAB1] [TAB2] [TAB3]`.
-/// Each entry is (label, is_active).
-pub fn render_tab_bar(frame: &mut Frame, area: Rect, tabs: &[(&str, bool)]) {
-    let mut spans = Vec::with_capacity(tabs.len() * 2 + 1);
-    spans.push(Span::raw(" "));
-    for (label, active) in tabs {
-        if *active {
-            spans.push(Span::styled(format!("[{label}]"), Theme::accent_bold()));
-        } else {
-            spans.push(Span::styled(format!("[{label}]"), Theme::muted()));
-        }
-        spans.push(Span::raw(" "));
     }
     frame.render_widget(
         Paragraph::new(Line::from(spans)).style(Style::default().bg(Theme::BG)),
@@ -334,5 +381,31 @@ pub fn truncate_str(s: &str, max: usize) -> String {
         let mut out: String = s.chars().take(max - 1).collect();
         out.push('…');
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn list_viewport_clamps_selected_and_keeps_it_visible() {
+        let view = list_viewport(20, 5, 18, 0);
+        assert_eq!(view.selected, 18);
+        assert_eq!(view.scroll, 14);
+        assert_eq!(
+            view.iter_range().collect::<Vec<_>>(),
+            vec![14, 15, 16, 17, 18]
+        );
+    }
+
+    #[test]
+    fn list_viewport_respects_existing_scroll_when_valid() {
+        let view = list_viewport(20, 6, 8, 6);
+        assert_eq!(view.selected, 8);
+        assert_eq!(view.scroll, 6);
+        assert_eq!(view.index_at_row(0), Some(6));
+        assert_eq!(view.index_at_row(5), Some(11));
+        assert_eq!(view.index_at_row(6), None);
     }
 }
